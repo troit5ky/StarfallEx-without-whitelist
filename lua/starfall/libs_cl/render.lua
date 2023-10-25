@@ -247,6 +247,7 @@ end)
 -- @client
 -- @param boolean depth Whether the current draw is writing depth
 -- @param boolean skybox Whether the current draw is drawing the skybox
+-- @param boolean skybox3d Whether the current draw is drawing the 3D skybox
 SF.hookAdd("PreDrawOpaqueRenderables", nil, hudPrepareSafeArgs, cleanupRender)
 
 --- Called after opaque entities are drawn. (Only works with HUD) (3D context)
@@ -255,6 +256,7 @@ SF.hookAdd("PreDrawOpaqueRenderables", nil, hudPrepareSafeArgs, cleanupRender)
 -- @client
 -- @param boolean depth Whether the current draw is writing depth
 -- @param boolean skybox Whether the current draw is drawing the skybox
+-- @param boolean skybox3d Whether the current draw is drawing the 3D skybox
 SF.hookAdd("PostDrawOpaqueRenderables", nil, hudPrepareSafeArgs, cleanupRender)
 
 --- Called before translucent entities are drawn. (Only works with HUD) (3D context)
@@ -263,6 +265,7 @@ SF.hookAdd("PostDrawOpaqueRenderables", nil, hudPrepareSafeArgs, cleanupRender)
 -- @client
 -- @param boolean depth Whether the current draw is writing depth
 -- @param boolean skybox Whether the current draw is drawing the skybox
+-- @param boolean skybox3d Whether the current draw is drawing the 3D skybox
 SF.hookAdd("PreDrawTranslucentRenderables", nil, hudPrepareSafeArgs, cleanupRender)
 
 --- Called after translucent entities are drawn. (Only works with HUD) (3D context)
@@ -271,6 +274,7 @@ SF.hookAdd("PreDrawTranslucentRenderables", nil, hudPrepareSafeArgs, cleanupRend
 -- @client
 -- @param boolean depth Whether the current draw is writing depth
 -- @param boolean skybox Whether the current draw is drawing the skybox
+-- @param boolean skybox3d Whether the current draw is drawing the 3D skybox
 SF.hookAdd("PostDrawTranslucentRenderables", nil, hudPrepareSafeArgs, cleanupRender)
 
 --- Called before drawing HUD (2D Context)
@@ -338,6 +342,12 @@ SF.hookAdd("PreDrawSkyBox", nil, hudPrepareSafeArgs, function(instance, args)
 	instance:cleanupRender()
     if args[1] and args[2]==true then return true end
 end)
+
+--- Called right after the 2D skybox has been drawn - allowing you to draw over it.
+-- @name postdraw2dskybox
+-- @class hook
+-- @client
+SF.hookAdd("PostDraw2DSkyBox", nil, hudPrepareSafeArgs, cleanupRender)
 
 --- Called after the 3D skybox is drawn. This will not be called if PreDrawSkyBox has prevented rendering of the skybox
 -- @name postdrawskybox
@@ -471,6 +481,8 @@ function instance:cleanupRender()
 	render.SetLightingMode(0)
 	render.ResetModelLighting(1, 1, 1)
 	render.DepthRange(0, 1)
+	render.SuppressEngineLighting(false)
+	render.SetWriteDepthToDestAlpha(true)
 	pp.colour:SetTexture("$fbtexture", tex_screenEffect)
 	pp.downsample:SetTexture("$fbtexture", tex_screenEffect)
 	for i = #matrix_stack, 1, -1 do
@@ -513,25 +525,31 @@ end
 
 
 -- ------------------------------------------------------------------ --
---- Returns the origin of the current render context as calculated by calcview.
-function render_library.getOrigin()
+--- Call EyePos()
+-- @return Vector The origin of the current render context as calculated by calcview.
+function render_library.getEyePos()
 	return vwrap(EyePos())
 end
 
---- Returns the angles of the current render context as calculated by calcview.
+render_library.getOrigin = render_library.getEyePos
+
+--- Call EyeAngles()
+-- @return Angle The angles of the current render context as calculated by calcview.
 function render_library.getAngles()
 	return awrap(EyeAngles())
 end
 
---- Returns the normal vector of the current render context as calculated by calcview, similar to render.getAngles.
-function render_library.getEye()
+--- Call EyeVector()
+-- @return Vector The normal vector of the current render context as calculated by calcview, similar to render.getAngles.
+function render_library.getEyeVector()
 	return vwrap(EyeVector())
 end
+
+render_library.getEye = render_library.getEyeVector
 
 --- Sets whether stencil tests are carried out for each rendered pixel. Only pixels passing the stencil test are written to the render target.
 -- @param boolean enable True to enable, false to disable
 function render_library.setStencilEnable(enable)
-	enable = (enable == true) -- Make sure it's a boolean
 	if not renderdata.isRendering then SF.Throw("Not in rendering hook.", 2) end
 	if renderdata.noStencil and not renderdata.usingRT then SF.Throw("Stencil operations must be used inside RenderTarget or HUD") end
 	render.SetStencilEnable(enable)
@@ -541,6 +559,21 @@ end
 function render_library.clearStencil()
 	if renderdata.noStencil and not renderdata.usingRT then SF.Throw("Stencil operations must be used inside RenderTarget or HUD") end
 	render.ClearStencil()
+end
+
+--- Suppresses or enables any engine lighting for any upcoming render operation.
+-- @param boolean suppress True to suppress false to enable.
+function render_library.suppressEngineLighting(enable)
+	if not renderdata.isRendering then SF.Throw("Not in rendering hook.", 2) end
+	render.SuppressEngineLighting(enable)
+end
+
+--- Sets the internal parameter INT_RENDERPARM_WRITE_DEPTH_TO_DESTALPHA. Allows creation of RTs with alpha masks.
+--- Check https://wiki.facepunch.com/gmod/render.SetWriteDepthToDestAlpha for example.
+-- @param boolean enable True to write depth to destination alpha.
+function render_library.setWriteDepthToDestAlpha(enable)
+	if not renderdata.isRendering then SF.Throw("Not in rendering hook.", 2) end
+	render.SetWriteDepthToDestAlpha(enable)
 end
 
 --- Sets up the ambient lighting for any upcoming render operation. Ambient lighting can be seen as a cube enclosing the object to be drawn, each of its faces representing a directional light source that shines towards the object.
@@ -561,7 +594,7 @@ function render_library.resetModelLighting(r, g, b)
 	if not renderdata.isRendering then SF.Throw("Not in rendering hook.", 2) end
 	render.ResetModelLighting(r, g, b)
 end
-	
+
 --- Clears the current rendertarget for obeying the current stencil buffer conditions.
 -- @param number r Value of the red channel to clear the current rt with.
 -- @param number g Value of the green channel to clear the current rt with.
@@ -658,7 +691,7 @@ end
 
 -- ------------------------------------------------------------------ --
 
---- Pushes a matrix onto the matrix stack.
+--- Pushes a matrix onto the model matrix stack.
 -- @param VMatrix m The matrix
 -- @param boolean? world Should the transformation be relative to the screen or world?
 function render_library.pushMatrix(m, world)
@@ -699,7 +732,7 @@ function render_library.disableScissorRect()
 	render.SetScissorRect(0 , 0 , 0 , 0, false)
 end
 
---- Pops a matrix from the matrix stack.
+--- Pops a matrix from the model matrix stack.
 function render_library.popMatrix()
 	if not renderdata.isRendering then SF.Throw("Not in rendering hook.", 2) end
 	if #matrix_stack <= 0 then SF.Throw("Popped too many matrices", 2) end
@@ -707,6 +740,12 @@ function render_library.popMatrix()
 	cam.PopModelMatrix()
 end
 
+--- Returns a copy of the model matrix that is at the top of the stack.
+-- @return VMatrix The currently active matrix.
+function render_library.getMatrix()
+	if not renderdata.isRendering then SF.Throw("Not in rendering hook.", 2) end
+	return mwrap(cam.GetModelMatrix())
+end
 
 local viewmatrix_checktypes =
 {
@@ -770,6 +809,9 @@ function render_library.popViewMatrix()
 
 	cam[view_matrix_stack[i]]()
 	view_matrix_stack[i] = nil
+
+	cam.Start3D()
+	cam.End3D() -- This fixes Vector:toScreen() breaking if you've pushed a viewmatrix beforehand. Yeah, it's stupid.
 end
 
 --- Sets background color of screen
@@ -1635,7 +1677,7 @@ end
 -- @param number x X coordinate
 -- @param number y Y coordinate
 -- @param string text Text to draw
--- @param number alignment Text alignment
+-- @param number alignment Horizontal text alignment. Default TEXT_ALIGN.LEFT
 function render_library.drawText(x, y, text, alignment)
 	if not renderdata.isRendering then SF.Throw("Not in rendering hook.", 2) end
 
@@ -1648,8 +1690,8 @@ end
 -- @param number x X coordinate
 -- @param number y Y coordinate
 -- @param string text Text to draw
--- @param number? xalign Text x alignment
--- @param number? yalign Text y alignment
+-- @param number? xalign Horizontal text alignment. Default TEXT_ALIGN.LEFT
+-- @param number? yalign Vertical text alignment. Default TEXT_ALIGN.TOP
 -- @return number Width of the drawn text. Same as calling render.getTextSize
 -- @return number Height of the drawn text. Same as calling render.getTextSize
 function render_library.drawSimpleText(x, y, text, xalign, yalign)
