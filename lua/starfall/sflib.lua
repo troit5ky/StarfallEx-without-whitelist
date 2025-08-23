@@ -4,10 +4,21 @@
 SF.Modules = {}
 SF.Types = {}
 SF.Libraries = {}
-SF.BlockedUsers = {}
 SF.ResourceCounters = {}
-SF.Superuser = {IsValid = function() return false end}
+SF.Superuser = {IsValid = function() return false end, SteamID64 = function() return "Superuser" end}
 local dgetmeta = debug.getmetatable
+local TypeID = TypeID
+local math_Clamp = math.Clamp
+local ENT_META,NPC_META,PHYS_META,PLY_META,VEH_META,WEP_META = FindMetaTable("Entity"),FindMetaTable("NPC"),FindMetaTable("PhysObj"),FindMetaTable("Player"),FindMetaTable("Vehicle"),FindMetaTable("Weapon")
+local Ent_EntIndex,Ent_Fire,Ent_FollowBone,Ent_GetAngles,Ent_GetAttachment,Ent_GetBonePosition,Ent_GetChildren,Ent_GetClass,Ent_GetCreationID,Ent_GetParent,Ent_GetPos,Ent_GetTable,Ent_IsScripted,Ent_IsValid,Ent_IsWorld,Ent_SetAngles,Ent_SetLocalAngularVelocity,Ent_SetLocalAngles,Ent_SetLocalPos,Ent_SetLocalVelocity,Ent_SetParent,Ent_SetPos = ENT_META.EntIndex,ENT_META.Fire,ENT_META.FollowBone,ENT_META.GetAngles,ENT_META.GetAttachment,ENT_META.GetBonePosition,ENT_META.GetChildren,ENT_META.GetClass,ENT_META.GetCreationID,ENT_META.GetParent,ENT_META.GetPos,ENT_META.GetTable,ENT_META.IsScripted,ENT_META.IsValid,ENT_META.IsWorld,ENT_META.SetAngles,ENT_META.SetLocalAngularVelocity,ENT_META.SetLocalAngles,ENT_META.SetLocalPos,ENT_META.SetLocalVelocity,ENT_META.SetParent,ENT_META.SetPos
+local function Ent_IsNPC(ent) return dgetmeta(ent)==NPC_META end
+local function Ent_IsPlayer(ent) return dgetmeta(ent)==PLY_META end
+local function Ent_IsVehicle(ent) return dgetmeta(ent)==VEH_META end
+local function Ent_IsWeapon(ent) return dgetmeta(ent)==WEP_META end
+-- Fixes case where addon detours SetParent and SF doesn't use the detour
+function Ent_SetParent(x,y) Ent_SetParent=ENT_META.SetParent return Ent_SetParent(x,y) end
+
+local Ply_IsSuperAdmin,Ply_Nick,Ply_PrintMessage,Ply_SteamID = PLY_META.IsSuperAdmin,PLY_META.Nick,PLY_META.PrintMessage,PLY_META.SteamID
 
 -- Make sure this is done after metatables have been set
 hook.Add("InitPostEntity","SF_SanitizeTypeMetatables",function()
@@ -88,6 +99,37 @@ hook.Add("InitPostEntity","SF_SanitizeTypeMetatables",function()
 	end
 end)
 
+local removedHooks = setmetatable({}, {__index=function(t,k) local r={} t[k]=r return r end})
+hook.Add("EntityRemoved","SF_CallOnRemove",function(ent)
+	local hooks = removedHooks[ent]
+	if hooks then
+		for k, v in pairs(hooks) do
+			if v[1] then v[1](ent) end
+		end
+		if CLIENT then
+			timer.Simple(0, function()
+				if not Ent_IsValid(ent) then
+					for k, v in pairs(hooks) do
+						if v[2] then v[2](ent) end
+					end
+					removedHooks[ent] = nil
+				end
+			end)
+		elseif SERVER then
+			removedHooks[ent] = nil
+		end
+	end
+end)
+function SF.CallOnRemove(ent, key, func, deferedfunc)
+	removedHooks[ent][key] = {func, deferedfunc}
+end
+function SF.RemoveCallOnRemove(ent, key)
+	local ret = removedHooks[ent][key]
+	removedHooks[ent][key] = nil
+	if next(removedHooks[ent])==nil then removedHooks[ent] = nil end
+	return ret
+end
+
 -------------------------------------------------------------------------------
 -- Declare Basic Starfall Types
 -------------------------------------------------------------------------------
@@ -98,22 +140,16 @@ function SF.EntityTable(key, destructor, dontwait)
 		__newindex = function(t, e, v)
 			rawset(t, e, v)
 			if e ~= SF.Superuser then
-				if dontwait then
-					e:CallOnRemove("SF_" .. key, function()
-						if t[e] then
-							if destructor then destructor(e, v) end
-							t[e] = nil
-						end
-					end)
+				local function ondestroy()
+					if t[e] then
+						t[e] = nil
+						if destructor then destructor(e, v) end
+					end
+				end
+				if SERVER or dontwait then
+					SF.CallOnRemove(e, key, ondestroy)
 				else
-					e:CallOnRemove("SF_" .. key, function()
-						timer.Simple(0, function()
-							if t[e] and not e:IsValid() then
-								if destructor then destructor(e, v) end
-								t[e] = nil
-							end
-						end)
-					end)
+					SF.CallOnRemove(e, key, nil, ondestroy)
 				end
 			end
 		end
@@ -156,32 +192,25 @@ setmetatable(SF.StructWrapper, SF.StructWrapper)
 SF.BurstObject = {
 	__index = {
 		calc = function(self, obj)
-			local ret = math.min(obj.val + (CurTime() - obj.lasttick) * self.rate, self.max)
+			local new = math.min(obj.val + (CurTime() - obj.lasttick) * self.rate, self.max)
+			obj.val = new
 			obj.lasttick = CurTime()
-			return ret
+			return new
 		end,
 		use = function(self, ply, amount)
-			if ply:IsValid() or ply==SF.Superuser then
-				local obj = self:get(ply)
-				local new = self:calc(obj) - amount
-				if new < 0 and ply~=SF.Superuser then
-					SF.Throw("The ".. self.name .." burst limit has been exceeded.", 3)
-				end
-				obj.val = new
-			else
-				SF.Throw("Invalid starfall user", 3)
+			local obj = self:get(ply)
+			local new = self:calc(obj) - amount
+			if new < 0 and ply~=SF.Superuser then
+				SF.Throw("The ".. self.name .." burst limit has been exceeded.", 3)
 			end
+			obj.val = new
 		end,
 		check = function(self, ply)
-			if ply:IsValid() or ply==SF.Superuser then
-				local obj = self:get(ply)
-				obj.val = self:calc(obj)
-				return obj.val
-			else
-				SF.Throw("Invalid starfall user", 3)
-			end
+			local obj = self:get(ply)
+			return self:calc(obj)
 		end,
 		get = function(self, ply)
+			if ply~=SF.Superuser and not Ent_IsValid(ply) then SF.Throw("Invalid starfall user", 4) end
 			local obj = self.objects[ply]
 			if not obj then
 				obj = {
@@ -220,21 +249,21 @@ setmetatable(SF.BurstObject, SF.BurstObject)
 SF.LimitObject = {
 	__index = {
 		use = function(self, ply, amount)
-			if ply:IsValid() or ply==SF.Superuser then
-				local obj = self:get(ply)
-				local new = obj.val + amount
-				if new > self.max and ply~=SF.Superuser then
+			if ply==SF.Superuser then return end
+			if Ent_IsValid(ply) then
+				local new = self.counters[ply] + amount
+				if new > self.max then
 					SF.Throw("The ".. self.name .." limit has been reached. (".. self.max ..")", 3)
 				end
-				obj.val = new
+				self.counters[ply] = new
 			else
 				SF.Throw("Invalid starfall user", 3)
 			end
 		end,
 		checkuse = function(self, ply, amount)
-			if ply:IsValid() or ply==SF.Superuser then
-				local obj = self:get(ply)
-				if obj.val + amount > self.max and ply~=SF.Superuser then
+			if ply==SF.Superuser then return end
+			if Ent_IsValid(ply) then
+				if self.counters[ply] + amount > self.max then
 					SF.Throw("The ".. self.name .." limit has been reached. (".. self.max ..")", 3)
 				end
 			else
@@ -242,34 +271,34 @@ SF.LimitObject = {
 			end
 		end,
 		check = function(self, ply)
-			if ply:IsValid() or ply==SF.Superuser then
-				return self.max - self:get(ply).val
+			if ply==SF.Superuser then return self.max end
+			if Ent_IsValid(ply) then
+				return self.max - self.counters[ply]
 			else
 				SF.Throw("Invalid starfall user", 3)
 			end
 		end,
 		free = function(self, ply, amount)
-			local obj = self.objects[ply]
-			if obj then
-				obj.val = math.Clamp(obj.val - amount, 0, self.max)
+			if ply==SF.Superuser then return end
+			if Ent_IsValid(ply) then
+				self.counters[ply] = math_Clamp(self.counters[ply] - amount, 0, self.max)
 			end
 		end,
 		get = function(self, ply)
-			local obj = self.objects[ply]
-			if not obj then
-				obj = {
-					val = 0,
-				}
-				self.objects[ply] = obj
+			if ply==SF.Superuser then return 0 end
+			if Ent_IsValid(ply) then
+				return self.counters[ply]
+			else
+				return 0
 			end
-			return obj
 		end,
 	},
 	__call = function(p, cvarname, limitname, max, maxhelp, scale)
 		local t = {
 			name = limitname,
-			objects = SF.EntityTable("limit"..cvarname)
+			counters = SF.EntityTable("limit"..cvarname)
 		}
+		getmetatable(t.counters).__index = function(t,k) t[k]=0 return 0 end
 
 		local maxname = "sf_"..cvarname.."_max"..(CLIENT and "_cl" or "")
 		local maxcvar = CreateConVar(maxname, tostring(max), FCVAR_ARCHIVE, maxhelp)
@@ -289,48 +318,58 @@ setmetatable(SF.LimitObject, SF.LimitObject)
 --- Returns a class that handles entities spawned by an instance
 SF.EntManager = {
 	__index = {
-		register = function(self, instance, ent)
-			if not self.nocallonremove then
-				local function sf_on_remove() self:onremove(instance, ent) end
-				ent.sf_on_remove = sf_on_remove
-				ent:CallOnRemove("starfall_entity_onremove", sf_on_remove)
-			end
-
+		register = function(self, instance, ent, onremove)
+			if self.registryByEnt[ent] then return end
+			if self.removeCb then SF.CallOnRemove(ent, self.removeCbName, self.removeCb) end
 			self.entsByInstance[instance][ent] = true
+			self.registryByEnt[ent] = {player = instance.player, instance = instance, onremove = onremove}
 			self:free(instance.player, -1)
 		end,
-		remove = function(self, instance, ent)
-			if ent:IsValid() then
-				if self.nocallonremove then
-					self:onremove(instance, ent)
-				else
-					-- The die function is called the next frame after 'Remove' which is too slow so call it ourself
-					ent:RemoveCallOnRemove("starfall_entity_onremove")
-					ent.sf_on_remove()
-				end
-				ent:Remove()
+		unregister = function(self, ent)
+			local register = self.registryByEnt[ent]
+			if not register then return end
+			self.registryByEnt[ent] = nil
+			if self.removeCb then SF.RemoveCallOnRemove(ent, self.removeCbName) end
+			self:free(register.player, 1)
+
+			if register.instance then
+				self.entsByInstance[register.instance][ent] = nil
+			end
+			if register.onremove then
+				register.onremove(ent)
 			end
 		end,
-		onremove = function(self, instance, ent)
-			self.entsByInstance[instance][ent] = nil
-			self:free(instance.player, 1)
+		remove = function(self, ent)
+			self:unregister(ent)
+			if ent:IsValid() then ent:Remove() end
 		end,
 		clear = function(self, instance)
 			for ent in pairs(self.entsByInstance[instance]) do
-				self:remove(instance, ent)
+				self:remove(ent)
 			end
 		end,
 		deinitialize = function(self, instance, shouldclear)
+			if not rawget(self.entsByInstance, instance) then return end
 			if shouldclear then
 				self:clear(instance)
+			else
+				for ent in pairs(self.entsByInstance[instance]) do
+					self.registryByEnt[ent].instance = nil
+				end
 			end
 			self.entsByInstance[instance] = nil
 		end
 	},
 	__call = function(p, cvarname, limitname, max, maxhelp, scale, nocallonremove)
 		local t = SF.LimitObject(cvarname, limitname, max, maxhelp, scale)
-		t.nocallonremove = nocallonremove or false
 		t.entsByInstance = setmetatable({},{__index = function(t,k) local r = {} t[k]=r return r end})
+		t.registryByEnt = {}
+		if nocallonremove then
+			t.removeCb = false
+		else
+			t.removeCb = function(ent) t:unregister(ent) end
+			t.removeCbName = "entmanager"..cvarname
+		end
 		return setmetatable(t, p)
 	end
 }
@@ -340,43 +379,39 @@ setmetatable(SF.EntManager.__index, SF.LimitObject)
 --- Returns a class that can limit per player and recycle a indestructable resource
 SF.ResourceHandler = {
 	__index = {
-		use = function(self, ply, t)
-			if self:check(ply) then
-				self.objects[t] = self.objects[t] or {}
-				local obj = next(self.objects[t])
-				if obj then
-					self.objects[t][obj] = nil
-				else
-					self.n = self.n + 1
-					obj = self.allocator(t, self.n)
-				end
-				if self.initializer then self.initializer(t, obj) end
-				self.players[ply] = self.players[ply] + 1
-				return obj
+		use = function(self, ply, key)
+			if not key then key = 1 end
+			self.limit:use(ply, 1)
+			local obj = next(self.objects[key])
+			if obj then
+				self.objects[key][obj] = nil
+			else
+				self.n = self.n + 1
+				obj = self.allocator(key, self.n)
 			end
+			if self.initializer then self.initializer(key, obj) end
+			return obj
 		end,
 		check = function(self, ply)
-			return self.players[ply] < self.max or ply==SF.Superuser
+			return self.limit:check(ply)
 		end,
-		free = function(self, ply, object)
-			local t = self.typer(object)
-			if not self.objects[t][object] then
-				if self.players[ply] <= 1 then self.players[ply] = nil else self.players[ply] = self.players[ply] - 1 end
-				self.objects[t][object] = true
-				if self.destructor then self.destructor(object) end
+		free = function(self, ply, obj, key)
+			if not key then key = 1 end
+			if not self.objects[key][obj] then
+				self.limit:free(ply, 1)
+				self.objects[key][obj] = true
+				if self.destructor then self.destructor(key, obj) end
 			end
 		end
 	},
-	__call = function(p, max, allocator, initializer, typer, destructor)
+	__call = function(p, cvarname, limitname, max, maxhelp, allocator, initializer, destructor)
 		local t = {
 			n = 0,
 			allocator = allocator,
 			initializer = initializer,
 			destructor = destructor,
-			typer = typer,
-			objects = {},
-			players = setmetatable({},{__index=function() return 0 end}),
-			max = max,
+			objects = setmetatable({}, {__index = function(t,k) local r={} t[k]=r return r end}),
+			limit = SF.LimitObject(cvarname, limitname, max, maxhelp),
 		}
 		return setmetatable(t, p)
 	end
@@ -401,15 +436,31 @@ SF.StringRestrictor = {
 			return self.default
 		end,
 		addWhitelistEntry = function(self, value)
-			table.insert(self.whitelist, value)
+			if not self.whitelistSet[value] then
+				self.whitelistSet[value] = true
+				table.insert(self.whitelist, value)
+			end
+			if self.blacklistSet[value] then
+				self.blacklistSet[value] = nil
+				table.RemoveByValue(self.blacklist, value)
+			end
 		end,
 		addBlacklistEntry = function(self, value)
-			table.insert(self.blacklist, value)
+			if not self.blacklistSet[value] then
+				table.insert(self.blacklist, value)
+				self.blacklistSet[value] = true
+			end
+			if self.whitelistSet[value] then
+				self.whitelistSet[value] = nil
+				table.RemoveByValue(self.whitelist, value)
+			end
 		end
 	},
 	__call = function(p, allowbydefault)
 		local t = {
+			whitelistSet = {},
 			whitelist = {}, -- patterns
+			blacklistSet = {},
 			blacklist = {}, -- patterns
 			default = allowbydefault or false,
 		}
@@ -418,17 +469,80 @@ SF.StringRestrictor = {
 }
 setmetatable(SF.StringRestrictor, SF.StringRestrictor)
 
+SF.NetValidator = {
+	Players = {},
+	__index = {
+		receive = function(self)
+			if net.ReadDouble() == self.validation then
+				self.successes = self.successes + 1
+				if self.successes == 5 then
+					self.success()
+					self:remove()
+				end
+			end
+		end,
+		tick = function(self)
+			if Ent_IsValid(self.player) then
+				self.validation = math.random()
+				net.Start("starfall_net_validate")
+				net.WriteDouble(self.validation)
+				net.Send(self.player)
+			else
+				self:remove()
+			end
+		end,
+		remove = function(self)
+			SF.NetValidator.Players[self.player] = nil
+			timer.Remove(self.timername)
+		end
+	},
+	__call = function(p, ply, success)
+		local t = setmetatable({
+			player = ply,
+			timername = "sf_net_validate"..Ent_EntIndex(ply),
+			successes = 0,
+			success = success,
+		}, p)
+		SF.NetValidator.Players[ply] = t
+		timer.Create(t.timername, 2, 0, function() t:tick() end)
+	end
+}
+setmetatable(SF.NetValidator, SF.NetValidator)
+
+if SERVER then
+	util.AddNetworkString("starfall_net_validate")
+	net.Receive("starfall_net_validate", function(len, ply)
+		if SF.NetValidator.Players[ply] then
+			SF.NetValidator.Players[ply]:receive()
+		end
+	end)
+else
+	net.Receive("starfall_net_validate", function()
+		net.Start("starfall_net_validate")
+		net.WriteDouble(net.ReadDouble())
+		net.SendToServer()
+	end)
+end
+
+local function steamIdToConsoleSafeName(steamid)
+	local ply = player.GetBySteamID(steamid)
+	return Ent_IsValid(ply) and string.gsub(Ply_Nick(ply), '[%z\x01-\x1f\x7f;"\']', "") or ""
+end
 
 --- Returns a class that can keep a list of blocked users
 SF.BlockedList = {
 	__index = {
+		toline = function(self, steamid, name)
+			return steamid..","..name.."\n"
+		end,
 		block = function(self, steamid)
 			if self.list[steamid] then return end
-			self.list[steamid] = true
+			local name = steamIdToConsoleSafeName(steamid)
+			self.list[steamid] = name
 
 			if self.filename then
 				local f = file.Open(self.filename,"a","DATA")
-				f:Write(steamid.."\n")
+				f:Write(self:toline(steamid, name))
 				f:Close()
 			end
 
@@ -442,8 +556,8 @@ SF.BlockedList = {
 
 			if self.filename then
 				local f = file.Open(self.filename,"w","DATA")
-				for id in pairs(self.list) do
-					f:Write(id.."\n")
+				for steamid, name in pairs(self.list) do
+					f:Write(self:toline(steamid, name))
 				end
 				f:Close()
 			end
@@ -459,7 +573,10 @@ SF.BlockedList = {
 			local f = file.Open(self.filename,"r","DATA")
 			if f then
 				while not f:EndOfFile() do
-					self.list[f:ReadLine()] = true
+					local steamid, name = string.match(f:ReadLine(), "([^,%s]+),?([^\n]*)")
+					if steamid then
+						self.list[steamid] = name
+					end
 				end
 				f:Close()
 			end
@@ -477,48 +594,26 @@ SF.BlockedList = {
 			blocked:readFile()
 		end
 
-		local function getCompletion(cmd, ply, steamid)
-			if IsValid(ply) then
-				return cmd.." \""..steamid.."\" // "..string.gsub(ply:GetName(), '[%z\x01-\x1f\x7f;"\']', "")
-			else
-				return cmd.." \""..steamid.."\""
-			end
-		end
-		local function getId(arg)
-			if not arg then print("missing steamid") return end
-			if not string.find(arg, '[^%d]') then arg = util.SteamIDFrom64(arg) or "" end
-			if string.sub(arg, 1, 6) ~= 'STEAM_' then return print("invalid steamid") end
-			return arg
-		end
-		concommand.Add("sf_"..prefix.."_block", function(executor, cmd, args)
-			local id = getId(args[1])
-			if id then
-				blocked:block(id)
-			end
-		end, function(cmd)
+		SF.SteamIDConcommand("sf_"..prefix.."_block", function(executor, id)
+			blocked:block(id)
+		end, "Block a user from " .. desc, false)
+
+		SF.SteamIDConcommand("sf_"..prefix.."_unblock", function(executor, id)
+			blocked:unblock(id)
+		end, "Unblock a user from " .. desc, false,
+		function(cmd)
 			local tbl = {}
-			for _, ply in pairs(player.GetHumans()) do
-				table.insert(tbl, getCompletion(cmd, ply, ply:SteamID()))
+			for steamid, name in pairs(blocked.list) do
+				table.insert(tbl, cmd.." \""..steamid.."\" // \""..name.."\"")
 			end
 			return tbl
-		end, "Block a user from " .. desc)
-		concommand.Add("sf_"..prefix.."_unblock", function(executor, cmd, args)
-			local id = getId(args[1])
-			if id then
-				blocked:unblock(id)
-			end
-		end, function(cmd)
-			local tbl = {}
-			for steamid in pairs(blocked.list) do
-				table.insert(tbl, getCompletion(cmd, player.GetBySteamID(steamid), steamid))
-			end
-			return tbl
-		end, "Unblock a user from " .. desc)
+		end)
+
 		concommand.Add("sf_"..prefix.."_blocklist", function(executor, cmd, args)
 			local n = 0
-			for steamid in pairs(blocked.list) do
-				print(getCompletion("", player.GetBySteamID(steamid), steamid))
-				n = n+1
+			for steamid, name in pairs(blocked.list) do
+				print("\""..steamid.."\" // \""..name.."\"")
+				n = n + 1
 			end
 			print("You have blocked "..n.." players from "..desc)
 		end, nil, "List players you have blocked from " .. desc)
@@ -531,59 +626,70 @@ setmetatable(SF.BlockedList, SF.BlockedList)
 
 SF.Parent = {
 	__index = {
-		updateTransform = function(self)
-			self.pos, self.ang = WorldToLocal(self.ent:GetPos(), self.ent:GetAngles(), self.parent:GetPos(), self.parent:GetAngles())
-		end,
-
-		applyTransform = function(self)
-			local pos, ang = LocalToWorld(self.pos, self.ang, self.parent:GetPos(), self.parent:GetAngles())
-			self.ent:SetPos(pos)
-			self.ent:SetAngles(ang)
-		end,
-		
 		parentTypes = {
 			entity = {
-				function(self)
-					self.ent:SetParent(self.parent)
+				applyParent = function(self)
+					Ent_SetParent(self.ent, self.parent)
 				end,
-				function(self)
-					local ent = self.ent
-					ent:SetParent()
-					ent:SetLocalVelocity(ent.targetLocalVelocity or vector_origin)
-				end
+				removeParent = function(self)
+					Ent_SetParent(self.ent)
+				end,
+				updateTransform = function(self)
+					self.pos, self.ang = WorldToLocal(Ent_GetPos(self.ent), Ent_GetAngles(self.ent), Ent_GetPos(self.parent), Ent_GetAngles(self.parent))
+				end,
+				applyTransform = function(self)
+					local pos, ang = LocalToWorld(self.pos, self.ang, Ent_GetPos(self.parent), Ent_GetAngles(self.parent))
+					Ent_SetPos(self.ent, pos)
+					Ent_SetAngles(self.ent, ang)
+				end,
 			},
 			attachment = {
-				function(self)
-					self.ent:SetParent(self.parent)
-					self.ent:Fire("SetParentAttachmentMaintainOffset", self.param, 0.01)
+				applyParent = function(self)
+					Ent_SetParent(self.ent, self.parent)
+					Ent_Fire(self.ent, "SetParentAttachment", self.param[1], 0.01)
 				end,
-				function(self)
-					self.ent:SetParent()
-				end
+				removeParent = function(self)
+					Ent_SetParent(self.ent)
+				end,
+				updateTransform = function(self)
+					local attach = Ent_GetAttachment(self.parent, self.param[2])
+					self.pos, self.ang = WorldToLocal(Ent_GetPos(self.ent), Ent_GetAngles(self.ent), attach.Pos, attach.Ang)
+				end,
+				applyTransform = function(self)
+					Ent_SetLocalPos(self.ent, self.pos)
+					Ent_SetLocalAngles(self.ent, self.ang)
+				end,
 			},
 			bone = {
-				function(self)
-					self.ent:FollowBone(self.parent, self.param)
+				applyParent = function(self)
+					Ent_FollowBone(self.ent, self.parent, self.param)
+					self:applyTransform()
 				end,
-				function(self)
-					local ent = self.ent
-					ent:FollowBone(NULL, 0)
-					ent:SetLocalVelocity(ent.targetLocalVelocity or vector_origin)
-				end
+				removeParent = function(self)
+					Ent_FollowBone(self.ent, NULL, 0)
+				end,
+				updateTransform = function(self)
+					local bonepos, boneang = Ent_GetBonePosition(self.parent, self.param)
+					self.pos, self.ang = WorldToLocal(Ent_GetPos(self.ent), Ent_GetAngles(self.ent), bonepos, boneang)
+				end,
+				applyTransform = function(self)
+					Ent_SetLocalPos(self.ent, self.pos)
+					Ent_SetLocalAngles(self.ent, self.ang)
+				end,
 			}
 		},
 
 		setParent = function(self, parent, type, param)
-			if self.parent and self.parent:IsValid() then
-				self.parent.sfParent.children[self.ent] = nil
+			if Ent_IsValid(self.parent) then
+				Ent_GetTable(self.parent).sfParent.children[self.ent] = nil
 				self:removeParent()
 			end
 			if parent then
 				self.parent = parent
 				self.param = param
-				self.applyParent, self.removeParent = unpack(self.parentTypes[type])
+				setmetatable(self, self.parentTypes[type])
 
-				parent.sfParent.children[self.ent] = self
+				Ent_GetTable(parent).sfParent.children[self.ent] = self
 				self:updateTransform()
 				self:applyParent()
 			else
@@ -592,70 +698,335 @@ SF.Parent = {
 				self.applyParent = nil
 				self.removeParent = nil
 			end
+			Ent_SetLocalVelocity(self.ent, self.localVel)
+			Ent_SetLocalAngularVelocity(self.ent, self.localAngVel)
 		end,
 
 		fix = function(self)
 			local cleanup = true
-			if self.parent and self.parent:IsValid() then
+			if Ent_IsValid(self.parent) then
 				cleanup = false
 			end
 			for child, data in pairs(self.children) do
-				if child:IsValid() then
+				if Ent_IsValid(child) then
 					data:applyTransform()
 					data:applyParent()
 					cleanup = false
 					
-					if child.sfParent then
-						child.sfParent:fix()
+					local sfParent = Ent_GetTable(child).sfParent
+					if sfParent then
+						sfParent:fix()
 					end
 				else
 					self.children[child] = nil
 				end
 			end
 			if cleanup then
-				self.ent.sfParent = nil
+				Ent_GetTable(self.ent).sfParent = nil
 			end
 		end,
 	},
 
+	Get = function(ent, create)
+		local sfParent = Ent_GetTable(ent).sfParent
+		if not sfParent and create then
+			sfParent = setmetatable({
+				ent = ent,
+				children = {},
+				localVel = Vector(),
+				localAngVel = Angle()
+			}, SF.Parent)
+			Ent_GetTable(ent).sfParent = sfParent
+		end
+		return sfParent
+	end,
+
 	__call = function(meta, child, parent, type, param)
 		if parent then
 			if SF.ParentChainTooLong(parent, child) then SF.Throw("Parenting chain cannot exceed 16 or crash may occur", 3) end
-
-			if not parent.sfParent then
-				parent.sfParent = setmetatable({
-					ent = parent,
-					children = {}
-				}, meta)
-			end
-
-			local sfParent = child.sfParent
-			if not sfParent then
-				sfParent = setmetatable({
-					ent = child,
-					children = {}
-				}, meta)
-				child.sfParent = sfParent
-			end
-
-			sfParent:setParent(parent, type, param)
-		elseif child.sfParent then
-			child.sfParent:setParent()
+			SF.Parent.Get(parent, true)
+			SF.Parent.Get(child, true):setParent(parent, type, param)
 		else
-			child:SetParent()
+			local sfParent = Ent_GetTable(child).sfParent
+			if sfParent then sfParent:setParent() else Ent_SetParent(child) end
 		end
 	end
 }
 setmetatable(SF.Parent, SF.Parent)
 
-if CLIENT then
-	-- When parent is retransmitted, it loses it's children
-	hook.Add("NotifyShouldTransmit", "SF_HologramParentFix", function(ent)
-		local sfParent = ent.sfParent
-		if sfParent then sfParent:fix() end
-	end)
-end
+setmetatable(SF.Parent.__index.parentTypes.entity, SF.Parent)
+SF.Parent.__index.parentTypes.entity.__index = SF.Parent.__index.parentTypes.entity
 
+setmetatable(SF.Parent.__index.parentTypes.attachment, SF.Parent)
+SF.Parent.__index.parentTypes.attachment.__index = SF.Parent.__index.parentTypes.attachment
+
+setmetatable(SF.Parent.__index.parentTypes.bone, SF.Parent)
+SF.Parent.__index.parentTypes.bone.__index = SF.Parent.__index.parentTypes.bone
+
+if CLIENT then
+-- When parent is retransmitted, it loses it's children
+hook.Add("NotifyShouldTransmit", "SF_HologramParentFix", function(ent)
+	local sfParent = Ent_GetTable(ent).sfParent
+	if sfParent then sfParent:fix() end
+end)
+
+SF.RenderStack = {
+	__index = {
+		create = function(self, data)
+			return setmetatable({
+				run = self.runDirty,
+				data = data,
+			}, self.objindex)
+		end,
+
+		runDirty = function(self, flags)
+			local pushes = {self.maincode[1]}
+			local pops = {self.maincode[3]}
+			for _, v in ipairs(self.properties) do
+				pushes[#pushes+1], pops[#pops+1] = v(self.data)
+			end
+
+			local code = {}
+			for i=1, #pushes do
+				code[#code + 1] = pushes[i]
+			end
+			code[#code + 1] = self.maincode[2]
+			for i=#pops, 1, -1 do
+				code[#code + 1] = pops[i]
+			end
+
+			self.renderfunc = CompileString(table.concat(code, " "), "RenderStack")()
+			self.run = self.runClean
+			self:run(flags)
+		end,
+
+		runClean = function(self, flags)
+			self.renderfunc(self.data, flags)
+		end,
+
+		makeDirty = function(self)
+			self.run = self.runDirty
+		end,
+	},
+	__call = function(p, maincode, properties)
+		local ret = setmetatable({
+			maincode = maincode,
+			properties = properties
+		}, p)
+		ret.objindex = {__index = ret}
+		return ret
+	end
+}
+setmetatable(SF.RenderStack, SF.RenderStack)
+
+local USE_AWESOMIUM_HACK = BRANCH == "unknown" or BRANCH == "dev" or BRANCH == "prerelease"
+SF.HttpTextureRequest = {
+	__index = {
+		INIT=function(self, new) return new~=self.LOAD and new~=self.DESTROY end,
+		LOAD=function(self, new) return new~=self.FETCH and new~=self.LAYOUT and new~=self.DESTROY end,
+		FETCH=function(self, new) return new~=self.LOAD and new~=self.DESTROY end,
+		LAYOUT=function(self, new) return new~=self.RENDER and new~=self.LAYOUT and new~=self.DESTROY end,
+		RENDER=function(self, new) return new~=self.DESTROY end,
+		DESTROY=function(self, new) return true end,
+
+		badnewstate = function(self, new)
+			if (self.instance and self.instance.error) and new~=self.DESTROY then self:destroy() return true end
+			if self:state(new) then return true end
+			self.state = new
+			return false
+		end,
+
+		load = function(self, textureloader)
+			if textureloader then self.textureloader = textureloader end
+			if self:badnewstate(self.LOAD) then return end
+
+			if USE_AWESOMIUM_HACK and not string.match(self.url, "^data:") then
+				self:loadAwesomium()
+				return
+			end
+
+			self.textureloader.Panel:AddFunction("sf", "imageLoaded", function(w, h)
+				timer.Simple(0, function() self:layout(w, h) end)
+			end)
+			self.textureloader.Panel:AddFunction("sf", "imageErrored", function()
+				timer.Simple(0, function() self:destroy() end)
+			end)
+			self.textureloader.Panel:RunJavascript(
+			[[img.removeAttribute("width");
+			img.removeAttribute("height");
+			img.style.left="0px";
+			img.style.top="0px";
+			img.src="]] .. string.JavascriptSafe(self.url) .. [[";]]..
+			(BRANCH == "unknown" and "\nif(img.complete)renderImage();" or ""))
+		end,
+
+		loadAwesomium = function(self)
+			if self:badnewstate(self.FETCH) then return end
+
+			http.Fetch(self.url, function(body, _, headers, code)
+				if code >= 300 then self:destroy() return end
+
+				local content_type = headers["Content-Type"] or headers["content-type"]
+				local data = util.Base64Encode(body, true)
+				
+				self.url = table.concat({"data:", content_type, ";base64,", data})
+
+				self:load()
+			end, function() self:destroy() end)
+		end,
+
+		layout = function(self, w, h)
+			if self:badnewstate(self.LAYOUT) then return end
+
+			if self.usedlayout then self:render() return end
+
+			if self.callback then
+				self.callback(w, h, function(x,y,w,h,pixelated)
+					self:applyLayout(x,y,w,h,pixelated)
+				end)
+			end
+
+			if not self.usedlayout then
+				self.usedlayout = true
+				if self.texture then
+					self:render()
+				else
+					timer.Simple(0, function() self:destroy(true) end)
+				end
+			end
+		end,
+
+		applyLayout = function(self,x,y,w,h,pixelated)
+			if self.usedlayout then SF.Throw("You can only use layout once", 3) end
+			SF.CheckLuaType(x, TYPE_NUMBER, 2)
+			SF.CheckLuaType(y, TYPE_NUMBER, 2)
+			SF.CheckLuaType(w, TYPE_NUMBER, 2)
+			SF.CheckLuaType(h, TYPE_NUMBER, 2)
+			if pixelated~=nil then SF.CheckLuaType(pixelated, TYPE_BOOL, 2) end
+			self.usedlayout = true
+			self.textureloader.Panel:RunJavascript([[
+				img.style.left=']]..x..[[px';img.style.top=']]..y..[[px';img.width=]]..w..[[;img.height=]]..h..[[;img.style.imageRendering=']]..(pixelated and "pixelated" or "auto")..[[';
+				renderImage();
+			]])
+		end,
+
+		render = function(self)
+			if self:badnewstate(self.RENDER) then return end
+			local frame = 0
+			hook.Add("PreRender",self.renderstr,function()
+				self.textureloader.Panel:UpdateHTMLTexture()
+				-- Running UpdateHTMLTexture a few times seems to fix materials not rendering
+				if frame<2 then frame = frame + 1 return end
+				local mat = self.textureloader.Panel:GetHTMLMaterial()
+				if mat then
+					render.PushRenderTarget(self.texture)
+						render.Clear(0, 0, 0, 0, false, false)
+						cam.Start2D()
+						surface.SetMaterial(mat)
+						surface.SetDrawColor(255, 255, 255)
+						surface.DrawTexturedRect(0, 0, 1024, 1024)
+						cam.End2D()
+					render.PopRenderTarget()
+				end
+				hook.Remove("PreRender", self.renderstr)
+				timer.Simple(0, function() self:destroy(true) end)
+			end)
+		end,
+		
+		destroy = function(self, success)
+			if self:badnewstate(self.DESTROY) then return end
+			if success then
+				if self.donecallback then self.donecallback() end
+			else
+				if self.callback then self.callback() end
+			end
+			self.textureloader:pop()
+		end,
+	},
+	__call = function(t, url, instance, texture, callback, donecallback)
+		local ret = setmetatable({
+			url = url or error("Expected url input!"),
+			instance = instance or false,
+			texture = texture or false,
+			callback = callback or false,
+			donecallback = donecallback or false,
+			usedlayout = false,
+			state = t.INIT,
+		}, t)
+		ret.renderstr = "SF_HTMLPanelCopyTexture"..string.format("%p",ret)
+		return ret
+	end
+}
+setmetatable(SF.HttpTextureRequest, SF.HttpTextureRequest)
+
+SF.HttpTextureLoader = {
+	__index = {
+		initialize = function(self, request)
+			local Panel = vgui.Create("DHTML")
+			Panel:SetSize(1024, 1024)
+			Panel:SetMouseInputEnabled(false)
+			Panel:SetHTML(
+			[[<html style="overflow:hidden"><body><script>
+			if (!requestAnimationFrame)
+				var requestAnimationFrame = webkitRequestAnimationFrame;
+			function renderImage(){
+				requestAnimationFrame(function(){
+					requestAnimationFrame(function(){
+						document.body.offsetWidth
+						requestAnimationFrame(function(){
+							sf.imageLoaded(img.width, img.height);
+						});
+					});
+				});
+			}
+			var img = new Image();
+			img.style.position="absolute";
+			img.onload = renderImage;
+			img.onerror = function (){sf.imageErrored();}
+			document.body.appendChild(img);
+			</script></body></html>]])
+			Panel:Hide()
+			Panel.OnFinishLoadingDocument = function() self:nextRequest() end
+			self.Panel = Panel
+
+			self.queue[1] = request
+			self.request = self.request_postInit
+		end,
+		
+		request_postInit = function(self, request)
+			local len = #self.queue
+			self.queue[len + 1] = request
+			if len==0 then timer.Simple(0, function() self:nextRequest() end) end
+		end,
+
+		nextRequest = function(self)
+			local request = self.queue[1]
+			request:load(self)
+			timer.Create(self.timeoutstr, 10, 1, function() request:destroy() end)
+		end,
+
+		pop = function(self)
+			table.remove(self.queue, 1)
+			if #self.queue > 0 then
+				self:nextRequest()
+			else
+				timer.Remove(self.timeoutstr)
+			end
+		end
+	},
+	__call = function(p)
+		local ret = setmetatable({
+			queue = {},
+		}, p)
+		ret.request = ret.initialize
+		ret.timeoutstr = "SF_URLTextureTimeout"..string.format("%p",ret)
+		return ret
+	end
+}
+setmetatable(SF.HttpTextureLoader, SF.HttpTextureLoader)
+
+SF.G_HttpTextureLoader = SF.HttpTextureLoader()
+end
 
 -- Error type containing error info
 SF.Errormeta = {
@@ -663,13 +1034,13 @@ SF.Errormeta = {
 	__metatable = "SFError"
 }
 
+SF.AutoGrowingTable = {
+    __index = function(t,k) local r=SF.AutoGrowingTable() t[k]=r return r end,
+    __call = function(t) return setmetatable({}, SF.AutoGrowingTable) end
+}
+setmetatable(SF.AutoGrowingTable, SF.AutoGrowingTable)
 
 --- Builds an error type to that contains line numbers, file name, and traceback
--- @param msg Message
--- @param level Which level in the stacktrace to blame
--- @param uncatchable Makes this exception uncatchable
--- @param prependinfo The error message needs file and line number info
--- @param userdata User's own error data that starfall's pcall will return if it exists
 function SF.MakeError(msg, level, uncatchable, prependinfo, userdata)
 	level = 1 + (level or 1)
 	local info = debug.getinfo(level, "Sl")
@@ -698,6 +1069,21 @@ function SF.MakeError(msg, level, uncatchable, prependinfo, userdata)
 	}, SF.Errormeta)
 end
 
+function SF.GetLines(str)
+	local current_pos = 1
+	local lineN = 0
+	return function()
+		local start_pos, end_pos = string.find( str, "\r?\n", current_pos )
+		if start_pos then
+			local ret = string.sub( str, current_pos, start_pos - 1 )
+			current_pos = end_pos + 1
+			lineN = lineN + 1
+			return lineN, ret
+		else
+			return nil
+		end
+	end
+end
 
 -------------------------------------------------------------------------------
 -- Starfall instance hook management
@@ -717,11 +1103,13 @@ do
 						local canrun, customargs = customargfunc(instance, ...)
 						if canrun then
 							local tbl = instance:runScriptHookForResult(hookname, unpack(customargs))
-							local sane = customretfunc(instance, tbl, ...)
-							if sane ~= nil then result = sane end
+							local sane = {customretfunc(instance, tbl, ...)}
+							if #sane > 0 then result = sane end
 						end
 					end
-					return result
+					if result then
+						return unpack(result)
+					end
 				end
 			else
 				return function(...)
@@ -739,10 +1127,12 @@ do
 					local result
 					for instance, _ in pairs(instances) do
 						local tbl = instance:runScriptHookForResult(hookname, unpack(instance.Sanitize({...})))
-						local sane = customretfunc(instance, tbl, ...)
-						if sane ~= nil then result = sane end
+						local sane = {customretfunc(instance, tbl, ...)}
+						if #sane > 0 then result = sane end
 					end
-					return result
+					if result then
+						return unpack(result)
+					end
 				end
 			else
 				return function(...)
@@ -758,27 +1148,41 @@ do
 	SF.HookTable = {
 		__index = {
 			add = function(self, index, func)
-				if not (self.hooks[index] or self.hookstoadd[index]) then
+				if not (self.hooks[index] or self.hookstoadd[index]) or self.hookstoremove[index] then
 					if self.n>=128 then SF.Throw("Max hooks limit reached", 3) end
 					self.n = self.n + 1
+					self.hookstoremove[index] = nil
 				end
 				self.hookstoadd[index] = func
+				self.pairs = self.dirtyPairs
 			end,
 			remove = function(self, index)
-				if self.hooks[index] or self.hookstoadd[index] then
+				if (self.hooks[index] or self.hookstoadd[index]) and not self.hookstoremove[index] then
 					self.n = self.n - 1
+					self.hookstoadd[index] = nil
+					self.hookstoremove[index] = true
+					self.pairs = self.dirtyPairs
 				end
-				self.hooks[index] = nil
-				self.hookstoadd[index] = nil
+			end,
+			exists = function(self, index)
+				return self.hooks[index]~=nil or self.hookstoadd[index]~=nil
 			end,
 			isEmpty = function(self)
 				return self.n==0
 			end,
-			pairs = function(self)
+			dirtyPairs = function(self)
+				for k, v in pairs(self.hookstoremove) do
+					self.hooks[k] = nil
+					self.hookstoremove[k] = nil
+				end
 				for k, v in pairs(self.hookstoadd) do
 					self.hooks[k] = v
 					self.hookstoadd[k] = nil
 				end
+				self.pairs = self.cleanPairs
+				return pairs(self.hooks)
+			end,
+			cleanPairs = function(self)
 				return pairs(self.hooks)
 			end,
 			run = function(self, instance, ...)
@@ -791,7 +1195,9 @@ do
 			return setmetatable({
 				hooks = {},
 				hookstoadd = {},
-				n = 0
+				hookstoremove = {},
+				n = 0,
+				pairs = p.cleanPairs
 			}, p)
 		end
 	}
@@ -809,33 +1215,27 @@ do
 		hookname = hookname or realname:lower()
 		registered_instances[hookname] = {}
 		if gmoverride then
-			local function override(again)
-				local hookfunc = getHookFunc(registered_instances[hookname], hookname, customargfunc, customretfunc)
+			local hookfunc = getHookFunc(registered_instances[hookname], hookname, customargfunc, customretfunc)
 
-				local gmfunc
-				if again then
-					gmfunc = GAMEMODE["SF"..realname]
-				else
-					gmfunc = GAMEMODE[realname]
-					GAMEMODE["SF"..realname] = gmfunc
-				end
-
-				if gmfunc then
-					GAMEMODE[realname] = function(gm, ...)
-						local a,b,c,d,e,f = hookfunc(...)
-						if a~= nil then return a,b,c,d,e,f
-						else return gmfunc(gm, ...) end
-					end
-				else
-					GAMEMODE[realname] = function(gm, ...)
-						return hookfunc(...)
-					end
-				end
-			end
-			if GAMEMODE then
-				override(true)
+			local gmfunc
+			local originalfunc = GAMEMODE["SF"..realname]
+			if originalfunc then
+				gmfunc = originalfunc
 			else
-				hook.Add("Initialize", "SF_Hook_Override"..hookname, override)
+				gmfunc = GAMEMODE[realname]
+				GAMEMODE["SF"..realname] = gmfunc
+			end
+
+			if gmfunc then
+				GAMEMODE[realname] = function(gm, ...)
+					local a,b,c,d,e,f = hookfunc(...)
+					if a~= nil then return a,b,c,d,e,f
+					else return gmfunc(gm, ...) end
+				end
+			else
+				GAMEMODE[realname] = function(gm, ...)
+					return hookfunc(...)
+				end
 			end
 		else
 			gmod_hooks[hookname] = { realname, customargfunc, customretfunc }
@@ -890,26 +1290,39 @@ end
 -- Utility functions
 -------------------------------------------------------------------------------
 
-SF.BlockedUsers = SF.BlockedList("user", "running clientside starfall code", "sf_blockedusers.txt",
-	function(steamid)
-		local ply = player.GetBySteamID(steamid)
-		if not ply then return end
-		for k, v in pairs(ents.FindByClass("starfall_processor")) do
-			if v.owner == ply and v.instance then
-				v:Error({message = "Blocked by user", traceback = ""})
+function SF.SteamIDConcommand(name, callback, helptext, findplayer, completionlist)
+	concommand.Add(name, function(executor, cmd, arg)
+		local retval = arg[1]
+		if not retval then
+			Ply_PrintMessage( executor, HUD_PRINTCONSOLE, "Missing steam id\n" )
+			return
+		end
+		if not string.match(retval, "%D") then
+			retval = util.SteamIDFrom64(retval) or ""
+		end
+		if not string.match(retval, "^STEAM_") then
+			Ply_PrintMessage( executor, HUD_PRINTCONSOLE, "Invalid steam id\n" )
+			return
+		end
+		if findplayer then
+			retval = player.GetBySteamID( retval )
+			if not retval then
+				Ply_PrintMessage( executor, HUD_PRINTCONSOLE, "Player not found\n" )
+				return
 			end
 		end
-	end,
-	function(steamid)
-		local ply = player.GetBySteamID(steamid)
-		if not ply then return end
-		for k, v in pairs(ents.FindByClass("starfall_processor")) do
-			if v.owner == ply then
-				v:Compile()
-			end
+
+		callback(executor, retval)
+
+	end, completionlist or function(cmd)
+		local tbl = {}
+		for _, ply in pairs(player.GetHumans()) do
+			local steamid = Ply_SteamID(ply)
+			table.insert(tbl, cmd.." \""..steamid.."\" // \""..steamIdToConsoleSafeName(steamid).."\"")
 		end
-	end
-)
+		return tbl
+	end, helptext)
+end
 
 --- Require .dll but doesn't throw an error. Returns true if success or false if fail.
 function SF.Require(moduleName)
@@ -939,6 +1352,7 @@ end
 
 --- Compile String but fix a compile error.
 function SF.CompileString(script, identifier, handle_error)
+	if not string.match(script, "%S") then return function() end end
 	if string.match(script, "%f[%w_]repeat%f[^%w_].*%f[%w_]continue%f[^%w_].*%f[%w_]until%f[^%w_]") then
 		return "Using 'continue' in a repeat-until loop has been banned due to a glua bug."
 	end
@@ -947,7 +1361,6 @@ end
 
 --- The safest write file function
 function SF.FileWrite(path, data)
-	path = SF.NormalizePath(path)
 	file.CreateDir(string.GetPathFromFilename( path ))
 	file.Write(path, data)
 	return file.Read(path)==data
@@ -1047,11 +1460,6 @@ function SF.TypeName(typeid)
 	return assert(SF.TYPENAME[typeid], "Type not defined")
 end
 
---- Checks the lua type of val. Errors if the types don't match
--- @param val The value to be checked.
--- @param typ A string type or metatable.
--- @param level Level at which to error at. 2 is added to this value. Default is 1.
--- @param msg Optional error message
 function SF.CheckLuaType(val, typ, level, msg)
 	if TypeID(val) ~= typ then
 		assert(isnumber(typ))
@@ -1061,31 +1469,34 @@ function SF.CheckLuaType(val, typ, level, msg)
 end
 
 --- Checks that the value is a non-nan number
--- @param val The value to be checked.
--- @param level Level at which to error at. 2 is added to this value. Default is 1.
--- @param msg Optional error message
 function SF.CheckValidNumber(val, level, msg)
 	if TypeID(val) ~= TYPE_NUMBER then SF.ThrowTypeError(SF.TypeName(TYPE_NUMBER), SF.GetType(val), (level or 1) + 2, msg) end
 	if val ~= val then SF.Throw((msg and #msg>0 and (msg .. " ") or "") .. "Input number is nan!", (level or 1) + 2) end
 end
 
 function SF.EntIsReady(ent)
-	if ent:IsWorld() then return true end
-	if ent:IsValid() then
-		-- https://github.com/Facepunch/garrysmod-issues/issues/3127
-		local class = ent:GetClass()
-		if class=="player" then
-			return ent:IsPlayer()
-		else
-			local n = next(baseclass.Get(class))
-			return n==nil or ent[n]~=nil
-		end
+	if Ent_IsWorld(ent) then return true end
+	if not Ent_IsValid(ent) then return false end
+
+	-- https://github.com/Facepunch/garrysmod-issues/issues/3127
+	local class = Ent_GetClass(ent)
+	if class=="player" then
+		return Ent_IsPlayer(ent)
+	elseif class=="starfall_processor" then
+		return Ent_GetTable(ent).Compile~=nil
+	elseif class=="starfall_hologram" then
+		return Ent_GetTable(ent).SetClip~=nil
+	elseif class=="starfall_prop" then
+		return Ent_GetTable(ent).BuildPhysics~=nil
+	elseif class=="starfall_screen" or class=="starfall_hud" then
+		return Ent_IsScripted(ent)
+	else
+		return true
 	end
-	return false
 end
 
 local waitingConditions = {}
-function SF.WaitForConditions(callback, timeout)
+function SF.WaitForConditions(callback, timeoutcallback, timeout)
 	if not callback() then
 		if #waitingConditions == 0 then
 			hook.Add("Think", "SF_WaitingForConditions", function()
@@ -1096,7 +1507,7 @@ function SF.WaitForConditions(callback, timeout)
 					if v.callback() then
 						table.remove(waitingConditions, i)
 					elseif time>v.timeout then
-						v.callback(true)
+						if v.timeoutcallback then v.timeoutcallback() end
 						table.remove(waitingConditions, i)
 					else
 						i = i + 1
@@ -1105,155 +1516,230 @@ function SF.WaitForConditions(callback, timeout)
 				if #waitingConditions == 0 then hook.Remove("Think", "SF_WaitingForConditions") end
 			end)
 		end
-		waitingConditions[#waitingConditions+1] = {callback = callback, timeout = CurTime()+timeout}
+		waitingConditions[#waitingConditions+1] = {callback = callback, timeoutcallback = timeoutcallback, timeout = CurTime()+timeout}
 	end
 end
 
-function SF.WaitForEntity(index, callback)
-	SF.WaitForConditions(function(timeout)
+function SF.WaitForEntity(index, creationIndex, callback)
+	SF.WaitForConditions(function()
 		local ent=Entity(index)
-		if SF.EntIsReady(ent) then
-			callback(ent)
+		if SF.EntIsReady(ent) and Ent_GetCreationID(ent)==creationIndex then
+			ProtectedCall(callback, ent)
 			return true
-		elseif timeout then
-			callback(nil)
 		end
-	end, 10)
+	end, callback, 10)
 end
+
 
 local playerinithooks = {}
 hook.Add("PlayerInitialSpawn","SF_PlayerInitialize",function(ply)
-	local n = "SF_WaitForPlayerInit"..ply:EntIndex()
-	hook.Add("SetupMove", n, function(ply2, mv, cmd)
-		if ply:IsValid() then
-			if ply == ply2 and not cmd:IsForced() then
-				for _, v in ipairs(playerinithooks) do v(ply) end
-				hook.Remove("SetupMove", n)
-			end
-		else
-			hook.Remove("SetupMove", n)
-		end
+	SF.NetValidator(ply, function()
+		for _, v in ipairs(playerinithooks) do v(ply) end
 	end)
 end)
 function SF.WaitForPlayerInit(func)
 	playerinithooks[#playerinithooks+1] = func
 end
 
-
 -- Table networking
 do
-	local typetostringfuncs = {
-		[TYPE_NUMBER] = function(ss, x) ss:writeInt8(TYPE_NUMBER) ss:writeDouble(x) end,
-		[TYPE_STRING] = function(ss, x) ss:writeInt8(TYPE_STRING) ss:writeInt32(#x) ss:write(x) end,
-		[TYPE_BOOL] = function(ss, x) ss:writeInt8(TYPE_BOOL) ss:writeInt8(x and 1 or 0) end,
-		[TYPE_ENTITY] = function(ss, x) ss:writeInt8(TYPE_ENTITY) ss:writeInt16(x:EntIndex()) end,
-		[TYPE_VECTOR] = function(ss, x) ss:writeInt8(TYPE_VECTOR) for i=1, 3 do ss:writeFloat(x[i]) end end,
-		[TYPE_ANGLE] = function(ss, x) ss:writeInt8(TYPE_ANGLE) for i=1, 3 do ss:writeFloat(x[i]) end end,
-		[TYPE_COLOR] = function(ss, x) ss:writeInt8(TYPE_COLOR) ss:writeInt8(x.r) ss:writeInt8(x.g) ss:writeInt8(x.b) ss:writeInt8(x.a) end,
-		[TYPE_MATRIX] = function(ss, x) ss:writeInt8(TYPE_MATRIX) for k, v in ipairs{x:Unpack()} do ss:writeFloat(v) end end,
-	}
-	local stringtotypefuncs = {
-		[TYPE_NUMBER] = function(ss) return ss:readDouble() end,
-		[TYPE_STRING] = function(ss) return ss:read(ss:readUInt32()) end,
-		[TYPE_BOOL] = function(ss) return ss:readUInt8() == 1 end,
-		[TYPE_ENTITY] = function(ss) return Entity(ss:readUInt16()) end,
-		[TYPE_VECTOR] = function(ss) return Vector(ss:readFloat(), ss:readFloat(), ss:readFloat()) end,
-		[TYPE_ANGLE] = function(ss) return Angle(ss:readFloat(), ss:readFloat(), ss:readFloat()) end,
-		[TYPE_COLOR] = function(ss) return Color(ss:readUInt8(), ss:readUInt8(), ss:readUInt8(), ss:readUInt8()) end,
-		[TYPE_MATRIX] = function(ss)
-			local t = {} for i=1, 16 do t[i] = ss:readFloat() end
-			local m = Matrix() m:SetUnpacked(unpack(t))
-			return m
-		end,
-	}
+	local TYPE_TABLEREF = 50
+	local TYPE_TABLESEQ = 51
+	local TYPE_TABLEHASH = 52
+	local TYPE_NUMBER8 = 53
+	local TYPE_NUMBER8NEG = 54
+	local TYPE_NUMBER16 = 55
+	local TYPE_NUMBER16NEG = 56
+	local TYPE_NUMBER32 = 57
+	local TYPE_NUMBER32NEG = 58
+	
+	local pairs_, instance_, tableLoopupCtr, tableLookup, ss
+
+	local typetostringfuncs = {}
+	local function typeToString(val)
+		typetostringfuncs[TypeID(val)](val)
+	end
+
+	local function errorType(x) error("Invalid type " .. SF.GetType(x)) end
+	for i=0, 255 do typetostringfuncs[i] = errorType end
+	typetostringfuncs[TYPE_NUMBER] = function(x)
+		if math.floor(x)==x then
+			local typeoffset
+			if x<0 then typeoffset = 1 x = -x else typeoffset = 0 end
+			if x<0x100 then ss:writeInt8(TYPE_NUMBER8 + typeoffset) ss:writeInt8(x)
+			elseif x<0x10000 then ss:writeInt8(TYPE_NUMBER16 + typeoffset) ss:writeInt16(x)
+			elseif x<0x100000000 then ss:writeInt8(TYPE_NUMBER32 + typeoffset) ss:writeInt32(x)
+			else ss:writeInt8(TYPE_NUMBER) ss:writeDouble(x)
+			end
+		else
+			ss:writeInt8(TYPE_NUMBER) ss:writeDouble(x)
+		end
+	end
+	typetostringfuncs[TYPE_STRING] = function(x) ss:writeInt8(TYPE_STRING) ss:writeInt32(#x) ss:write(x) end
+	typetostringfuncs[TYPE_BOOL] = function(x) ss:writeInt8(TYPE_BOOL) ss:writeInt8(x and 1 or 0) end
+	typetostringfuncs[TYPE_ENTITY] = function(x) ss:writeInt8(TYPE_ENTITY) ss:writeInt16(Ent_EntIndex(x)) end
+	typetostringfuncs[TYPE_VECTOR] = function(x) ss:writeInt8(TYPE_VECTOR) for i=1, 3 do ss:writeFloat(x[i]) end end
+	typetostringfuncs[TYPE_ANGLE] = function(x) ss:writeInt8(TYPE_ANGLE) for i=1, 3 do ss:writeFloat(x[i]) end end
+	typetostringfuncs[TYPE_COLOR] = function(x) ss:writeInt8(TYPE_COLOR) ss:writeInt8(x.r) ss:writeInt8(x.g) ss:writeInt8(x.b) ss:writeInt8(x.a) end
+	typetostringfuncs[TYPE_MATRIX] = function(x) ss:writeInt8(TYPE_MATRIX) for k, v in ipairs{x:Unpack()} do ss:writeFloat(v) end end
+	typetostringfuncs[TYPE_TABLE] = function(val)
+		if instance_ then
+			local unwrapped = instance_.UnwrapObject(val)
+			if unwrapped then return typeToString(unwrapped) end
+		end
+
+		if IsColor(val) then return typetostringfuncs[TYPE_COLOR](val) end
+
+		local lookup = tableLookup[val]
+		if lookup then
+			ss:writeInt8(TYPE_TABLEREF)
+			ss:writeInt32(lookup)
+			return
+		end
+		tableLookup[val] = tableLoopupCtr
+		tableLoopupCtr = tableLoopupCtr + 1
+
+		local nseq = 1
+		local nhash = 0
+		for key, value in pairs(val) do
+			if key==nseq then nseq = nseq + 1
+			else nhash = nhash + 1
+			end
+		end
+
+		if nseq>1 then
+			if nhash>0 then
+				ss:writeInt8(TYPE_TABLE)
+				ss:writeInt32(nseq - 1)
+				for i=1, nseq-1 do
+					typeToString(val[i])
+				end
+				nseq = 1
+				ss:writeInt32(nhash)
+				for key, value in pairs_(val) do
+					if key==nseq then nseq = nseq + 1 else
+						typeToString(key)
+						typeToString(value)
+					end
+				end
+			else
+				ss:writeInt8(TYPE_TABLESEQ)
+				ss:writeInt32(nseq - 1)
+				for i=1, nseq-1 do
+					typeToString(val[i])
+				end
+			end
+		else
+			if nhash>0 then
+				ss:writeInt8(TYPE_TABLEHASH)
+				nseq = 1
+				ss:writeInt32(nhash)
+				for key, value in pairs_(val) do
+					if key==nseq then nseq = nseq + 1 else
+						typeToString(key)
+						typeToString(value)
+					end
+				end
+			else
+				ss:writeInt8(TYPE_TABLESEQ)
+				ss:writeInt32(0)
+			end
+		end
+	end
+
+	local stringtotypefuncs = {}
+	local stringToType
+
+	local function errorType() error("Invalid type while decoding!") end
+	for i=0, 255 do stringtotypefuncs[i] = errorType end
+	stringtotypefuncs[TYPE_NUMBER] = function() return ss:readDouble() end
+	stringtotypefuncs[TYPE_STRING] = function() return ss:read(ss:readUInt32()) end
+	stringtotypefuncs[TYPE_BOOL] = function() return ss:readUInt8() == 1 end
+	stringtotypefuncs[TYPE_ENTITY] = function() return Entity(ss:readUInt16()) end
+	stringtotypefuncs[TYPE_VECTOR] = function() return Vector(ss:readFloat(), ss:readFloat(), ss:readFloat()) end
+	stringtotypefuncs[TYPE_ANGLE] = function() return Angle(ss:readFloat(), ss:readFloat(), ss:readFloat()) end
+	stringtotypefuncs[TYPE_COLOR] = function() return Color(ss:readUInt8(), ss:readUInt8(), ss:readUInt8(), ss:readUInt8()) end
+	stringtotypefuncs[TYPE_MATRIX] = function()
+		local t = {} for i=1, 16 do t[i] = ss:readFloat() end
+		local m = Matrix() m:SetUnpacked(unpack(t))
+		return m
+	end
+	stringtotypefuncs[TYPE_TABLE] = function()
+		local t = {}
+		for i=1, ss:readUInt32() do
+			t[i] = stringToType()
+		end
+		for i=1, ss:readUInt32() do
+			local key, val = stringToType(), stringToType()
+			t[key] = val
+		end
+		tableLookup[#tableLookup + 1] = t
+		return t
+	end
+	stringtotypefuncs[TYPE_TABLEREF] = function()
+		return tableLookup[ss:readUInt32()]
+	end
+	stringtotypefuncs[TYPE_TABLESEQ] = function()
+		local t = {}
+		for i=1, ss:readUInt32() do
+			t[i] = stringToType()
+		end
+		tableLookup[#tableLookup + 1] = t
+		return t
+	end
+	stringtotypefuncs[TYPE_TABLEHASH] = function()
+		local t = {}
+		for i=1, ss:readUInt32() do
+			local key, val = stringToType(), stringToType()
+			t[key] = val
+		end
+		tableLookup[#tableLookup + 1] = t
+		return t
+	end
+	stringtotypefuncs[TYPE_NUMBER8] = function() return ss:readUInt8() end
+	stringtotypefuncs[TYPE_NUMBER8NEG] = function() return -ss:readUInt8() end
+	stringtotypefuncs[TYPE_NUMBER16] = function() return ss:readUInt16() end
+	stringtotypefuncs[TYPE_NUMBER16NEG] = function() return -ss:readUInt16() end
+	stringtotypefuncs[TYPE_NUMBER32] = function() return ss:readUInt32() end
+	stringtotypefuncs[TYPE_NUMBER32NEG] = function() return -ss:readUInt32() end
+	
 	--- Convert table to string data.
 	-- Only works with strings, numbers, tables, bools, 
 	function SF.TableToString(tbl, instance, sorted)
-		local pairs = sorted and SortedPairs or pairs
-		local ss = SF.StringStream()
-		local tableLoopupCtr = 1
-		local tableLookup = {}
-
-		local function typeToString(val)
-			local func = typetostringfuncs[TypeID(val)]
-			if func then func(ss, val) else error("Invalid type " .. SF.GetType(val)) end
-		end
-
-		typetostringfuncs[TYPE_TABLE] = function(ss, val)
-			if instance then
-				local unwrapped = instance.UnwrapObject(val)
-				if unwrapped then
-					typeToString(unwrapped)
-					return
-				end
-			end
-
-			if IsColor(val) then return typetostringfuncs[TYPE_COLOR](ss, val) end
-			
-			ss:writeInt8(TYPE_TABLE)
-			
-			local lookup = tableLookup[val]
-			if lookup then
-				ss:writeInt16(lookup)
-				return
-			end
-			
-			tableLookup[val] = tableLoopupCtr
-			tableLoopupCtr = tableLoopupCtr + 1
-			ss:writeInt16(tableLoopupCtr)
-			ss:writeInt16(table.Count(val))
-			
-			for key, value in pairs(val) do
-				typeToString(key)
-				typeToString(value)
-			end
-		end
+		pairs_ = sorted and SortedPairs or pairs
+		instance_ = instance
+		tableLoopupCtr = 1
+		tableLookup = {}
+		ss = SF.StringStream()
 
 		typeToString(tbl)
+
 		local ret = ss:getString()
-		ss, tableLookup = nil, nil
+		tableLookup = nil
+		ss = nil
 		return ret
 	end
 
 	--- Convert string data to table
 	function SF.StringToTable(str, instance)
-		local ss = SF.StringStream(str)
-		local tableLookup = {}
+		instance_ = instance
+		tableLookup = {}
+		ss = SF.StringStream(str)
 
-		local function stringToType()
-			local t = ss:readUInt8()
-			local func = stringtotypefuncs[t]
-			if func then return func(ss) else error("Invalid type " .. t) end
-		end
-
-		stringtotypefuncs[TYPE_TABLE] = function(ss)
-			local index = ss:readUInt16()
-			local lookup = tableLookup[index]
-			if lookup then
-				return lookup
+		if instance then
+			function stringToType()
+				local val = stringtotypefuncs[ss:readUInt8()]()
+				return instance.WrapObject(val) or val
 			end
-			
-			local t = {}
-			tableLookup[index] = t
-			
-			for i=1, ss:readUInt16() do
-				local key, val
-				if instance then
-					key = stringToType()
-					key = instance.WrapObject(key) or key
-					val = stringToType()
-					val = instance.WrapObject(val) or val
-				else
-					key = stringToType()
-					val = stringToType()
-				end
-				t[key] = val
+		else
+			function stringToType()
+				return stringtotypefuncs[ss:readUInt8()]()
 			end
-			return t
 		end
 
 		local ret = stringToType()
-		ss, tableLookup = nil, nil
+		tableLookup = nil
+		ss = nil
 		return ret
 	end
 end
@@ -1270,8 +1756,17 @@ local shaderBlacklist = {
 }
 local materialBlacklist = {
 	["pp/copy"] = true,
+	["debug/debugluxels"] = true,
 	["effects/ar2_altfire1"] = true,
 }
+SF.allowedRenderGroups = {
+	[RENDERGROUP_OPAQUE]=true,
+	[RENDERGROUP_TRANSLUCENT]=true,
+	[RENDERGROUP_BOTH]=true,
+	[RENDERGROUP_VIEWMODEL]=true,
+	[RENDERGROUP_VIEWMODEL_TRANSLUCENT]=true
+}
+
 --- Checks that the material isn't malicious
 -- @param Material The path to the material
 -- @return The material object or false if it's invalid
@@ -1285,20 +1780,38 @@ function SF.CheckMaterial(material)
 	return mat
 end
 
-
-function SF.CheckModel(model, player, prop)
-	if #model > 260 then return false end
+function SF.CheckModel(model, ply, prop)
+	if #model > 260 then SF.Throw("Model path too long!", 3) end
 	model = SF.NormalizePath(string.lower(model))
-	if string.GetExtensionFromFilename(model) == "mdl" and (CLIENT or (util.IsValidModel(model) and (not prop or util.IsValidProp(model)))) then
-		if player and player:IsValid() then
-			if hook.Run("PlayerSpawnObject", player, model)~=false then
-				return model
+	if string.GetExtensionFromFilename(model) ~= "mdl" or (SERVER and (not util.IsValidModel(model) or (prop and not util.IsValidProp(model)))) then SF.Throw("Invalid model: "..model, 3) end
+	if ply~=SF.Superuser and hook.Run("PlayerSpawnObject", ply, model)==false then SF.Throw("Not allowed to use model: "..model, 3) end
+	return model
+end
+
+SF.UniqueSounds = setmetatable({}, {__index=function(t,k) local r={[1]=0} t[k]=r return r end})
+local maxUniqueSounds = CreateConVar("sf_sounds_unique_max"..(CLIENT and "_cl" or ""), "200", FCVAR_ARCHIVE, "The maximum number of unique sounds paths allowed")
+
+function SF.CheckSound(ply, path)
+	-- Limit length and remove invalid chars
+	if #path>260 then SF.Throw("Sound path too long!", 3) end
+	if string.match(path, "[\"?']") then SF.Throw("Sound path contains invalid characters!", 3) end
+
+	-- Extract sound flags. Only allowed flags are '@' '#' '<', '>', '^', ')'
+	local flags, checkpath = string.match(path, "^([^%w_/%.]*)(.*)")
+	if #flags>2 or string.match(flags, "[^@#<>%^%)]") then
+		SF.Throw("Invalid sound flags! "..flags, 3)
+	end
+
+	if ply~=SF.Superuser then
+		local UserUniqueSounds = SF.UniqueSounds[Ply_SteamID(ply)]
+		if not UserUniqueSounds[checkpath] then
+			if UserUniqueSounds[1] >= maxUniqueSounds:GetInt() then
+				SF.Throw("The unique sounds limit has been reached.", 3)
 			end
-		else
-			return model
+			UserUniqueSounds[checkpath] = true
+			UserUniqueSounds[1] = UserUniqueSounds[1] + 1
 		end
 	end
-	SF.Throw("Invalid model: "..model, 3)
 end
 
 function SF.CheckRagdoll(model)
@@ -1319,7 +1832,7 @@ local drawEntityClasses = {
 	["prop_vehicle_prisoner_pod"] = true,
 }
 function SF.CanDrawEntity(ent)
-	return drawEntityClasses[ent:GetClass()] and not ent:GetParent():IsValid() and ent.RenderOverride==nil
+	return drawEntityClasses[Ent_GetClass(ent)] and not Ent_IsValid(Ent_GetParent(ent)) and Ent_GetTable(ent).RenderOverride==nil
 end
 
 --- Chooses whether to use absolute or relative path
@@ -1363,7 +1876,7 @@ function SF.GetExecutingPath()
 		local info = debug.getinfo(stackLevel, "S")
 		if not info then break end
 
-		curdir = string.match(info.short_src, "^SF:(.*[/\\])")
+		curdir = string.match(info.short_src, "^SF:(.*)")
 		stackLevel = stackLevel + 1
 	until curdir
 	return curdir
@@ -1373,16 +1886,16 @@ end
 function SF.ParentChainTooLong(parent, child)
 	local index = parent
 	local parentLength = 0
-	while index:IsValid() do
+	while Ent_IsValid(index) do
 		if index == child then return true end
 		parentLength = parentLength + 1
-		index = index:GetParent()
+		index = Ent_GetParent(index)
 	end
 
 	local function getChildLength(curchild, count)
 		if count > 16 then return count end
 		local max = count
-		for k, v in pairs(curchild:GetChildren()) do
+		for k, v in pairs(Ent_GetChildren(curchild)) do
 			if v == parent then return 17 end
 			max = math.max(max, getChildLength(v, count + 1))
 		end
@@ -1396,12 +1909,26 @@ end
 -- This function clamps the position before moving the entity
 local minx, miny, minz = -16384, -16384, -16384
 local maxx, maxy, maxz = 16384, 16384, 16384
-local clamp = math.Clamp
 function SF.clampPos(pos)
-	pos.x = clamp(pos.x, minx, maxx)
-	pos.y = clamp(pos.y, miny, maxy)
-	pos.z = clamp(pos.z, minz, maxz)
+	pos.x = math_Clamp(pos.x, minx, maxx)
+	pos.y = math_Clamp(pos.y, miny, maxy)
+	pos.z = math_Clamp(pos.z, minz, maxz)
 	return pos
+end
+
+function SF.CheckVector(v)
+	if v[1]<-1e12 or v[1]>1e12 or v[1]~=v[1] or
+	   v[2]<-1e12 or v[2]>1e12 or v[2]~=v[2] or
+	   v[3]<-1e12 or v[3]>1e12 or v[3]~=v[3] then
+
+		SF.Throw("Input vector too large or NAN", 3)
+	end
+end
+
+function SF.CheckNumber(n)
+	if n<-1e12 or n>1e12 or n~=n then
+		SF.Throw("Input number too large or NAN", 3)
+	end
 end
 
 local dumbtrace = {
@@ -1426,22 +1953,18 @@ function SF.dumbTrace(entity, pos)
 	return dumbtrace
 end
 
-function SF.IsHUDActive(ent, ply)
-	local tbl = ent.ActiveHuds
-	return tbl and tbl[SERVER and (ply or error("Missing player arg")) or LocalPlayer()]
+SF.IsHUDActive = SERVER and function(ent, ply)
+	if ply==nil then error("Missing player arg") end
+	local tbl = Ent_GetTable(ent) if tbl==nil then return false end
+	tbl = tbl.ActiveHuds if tbl==nil then return false end
+	return tbl[ply] == true
+end
+or function(ent)
+	local tbl = Ent_GetTable(ent) if tbl==nil then return false end
+	tbl = tbl.ActiveHuds if tbl==nil then return false end
+	return tbl[LocalPlayer()] == true
 end
 
--- ------------------------------------------------------------------------- --
---- Legacy deserializes an instance's code.
--- @return The table of filename = source entries
--- @return The main filename
-function SF.LegacyDeserializeCode(tbl)
-	local sources = {}
-	for filename, source in pairs(tbl.source) do
-		sources[filename] = string.gsub(source, "[" .. string.char(5) .. string.char(4) .. "]", { [string.char(5)[1]] = "\n", [string.char(4)[1]] = '"' })
-	end
-	return sources, tbl.mainfile
-end
 
 local soundsMap = {
 	["DRIP1"] = 0, [0] = "ambient/water/drip1.wav",
@@ -1470,10 +1993,10 @@ if SERVER then
 	util.AddNetworkString("starfall_print")
 
 	function SF.AddNotify(ply, msg, notifyType, duration, sound)
-		if not (ply and ply:IsValid()) then return end
+		if not Ent_IsValid(ply) then return end
 
 		net.Start("starfall_addnotify")
-		net.WriteString(msg)
+		net.WriteString(string.sub(msg, 1, 1024))
 		net.WriteUInt(notificationsMap[notifyType], 8)
 		net.WriteFloat(duration)
 		net.WriteUInt(soundsMap[sound], 8)
@@ -1499,7 +2022,10 @@ else
 			print(msg)
 			GAMEMODE:AddNotify(msg, notificationsMap[type], duration)
 			if soundsMap[sound] then
-				surface.PlaySound(soundsMap[soundsMap[sound]])
+				local path = soundsMap[soundsMap[sound]]
+				if path then
+					surface.PlaySound(path)
+				end
 			end
 		end
 	end
@@ -1509,16 +2035,19 @@ else
 		print(msg)
 		GAMEMODE:AddNotify(msg, type, duration)
 		if soundsMap[sound] then
-			surface.PlaySound(soundsMap[sound])
+			local path = soundsMap[soundsMap[sound]]
+			if path then
+				surface.PlaySound(path)
+			end
 		end
 	end)
 
 	function SF.HTTPNotify(ply, url)
 		local plyStr
-		if ply:IsValid() then
-			plyStr = ply:Nick() .. " [" .. ply:SteamID() .. "]"
-		elseif ply == SF.Superuser then
+		if ply == SF.Superuser then
 			plyStr = "Superuser"
+		elseif Ent_IsValid(ply) then
+			plyStr = Ply_Nick(ply) .. " [" .. Ply_SteamID(ply) .. "]"
 		else
 			plyStr = "Invalid user"
 		end
@@ -1840,6 +2369,7 @@ do
 	string_library.setChar = string.SetChar string_library.SetChar = string.SetChar
 	string_library.split = string.Split string_library.Split = string.Split
 	string_library.startWith = string.StartWith string_library.StartWith = string.StartWith
+	string_library.startsWith = string.StartsWith string_library.StartsWith = string.StartsWith
 	string_library.stripExtension = string.StripExtension string_library.StripExtension = string.StripExtension
 	string_library.sub = string.sub
 	string_library.toMinutesSeconds = string.ToMinutesSeconds string_library.ToMinutesSeconds = string.ToMinutesSeconds
@@ -1878,6 +2408,9 @@ include("preprocessor.lua")
 include("permissions/core.lua")
 include("editor/editor.lua")
 include("transfer.lua")
+if CLIENT then
+	include("toolscreen.lua")
+end
 
 do
 	local function compileModule(source, path)
@@ -1915,20 +2448,28 @@ do
 		end
 	end
 
-	loadModules("starfall/libs_sh/", SERVER or CLIENT)
-	loadModules("starfall/libs_sv/", SERVER)
-	loadModules("starfall/libs_cl/", CLIENT)
-	SF.Permissions.loadPermissions()
+	hook.Add("Initialize","SF",function()
+		loadModules("starfall/libs_sh/", SERVER or CLIENT)
+		loadModules("starfall/libs_sv/", SERVER)
+		loadModules("starfall/libs_cl/", CLIENT)
+		SF.Permissions.includePermissions()
+		SF.Permissions.loadPermissions()
+
+		if SERVER then
+			include("starfall/editor/docs.lua")
+			hook.Run("StarfallProcessDocs", SF.Docs)
+			SF.Docs = util.Compress(SF.TableToString(SF.Docs, nil, true))
+			SF.DocsCRC = util.CRC(SF.Docs)
+		end
+		hook.Remove("Initialize","SF")
+	end)
 
 	if SERVER then
 		util.AddNetworkString("sf_receivelibrary")
-		include("starfall/editor/docs.lua")
-		SF.Docs = util.Compress(SF.TableToString(SF.Docs, nil, true))
-		SF.DocsCRC = util.CRC(SF.Docs)
 
 		-- Command to reload the libraries
 		concommand.Add("sf_reloadlibrary", function(ply, com, arg)
-			if ply:IsValid() and not ply:IsSuperAdmin() then return end
+			if Ent_IsValid(ply) and not Ply_IsSuperAdmin(ply) then return end
 			local name = arg[1]
 			if not name then return end
 			name = string.lower(name)
@@ -1936,6 +2477,8 @@ do
 			local sv_filename = "starfall/libs_sv/"..name..".lua"
 			local sh_filename = "starfall/libs_sh/"..name..".lua"
 			local cl_filename = "starfall/libs_cl/"..name..".lua"
+
+			SF.ReloadingLibrary = true
 
 			local sendToClientTbl = {}
 			if file.Exists(sh_filename, "LUA") or file.Exists(sv_filename, "LUA") then
@@ -1948,6 +2491,7 @@ do
 				if file.Exists(sv_filename, "LUA") then
 					addModule(name, sv_filename, true)
 				end
+				SF.Permissions.loadPermissions()
 			end
 			if file.Exists(cl_filename, "LUA") then
 				addModule(name, cl_filename, false)
@@ -1959,21 +2503,55 @@ do
 					files[name..":"..path] = file.Read(path, "LUA")
 				end
 				net.Start("sf_receivelibrary")
-				net.WriteBool(false)
-				net.WriteStarfall({files = files, mainfile = name, proc = Entity(0), owner = Entity(0)})
+				net.WriteStarfall({files = files, mainfile = name})
 				net.Broadcast()
 			end
+
+			SF.ReloadingLibrary = false
 		end)
+
+		-- For development. Generates the ENT locals used by the library
+		if game.SinglePlayer() then
+			concommand.Add("sf_printlibrarylocals", function(ply, com, arg)
+				if not arg[1] then print("Expected library path argument in 'starfall'") return end
+				local lib = file.Read("starfall/"..arg[1], "LUA")
+				if not lib then print("File not found: ".."\"starfall/"..arg[1].."\"") return end
+				local metas = {"Ent_","Ply_","Wep_","Veh_","Npc_","Phys_"}
+				local badfuncs = {"IsPlayer","IsWeapon","IsVehicle","IsNPC"}
+				for _, meta in ipairs(metas) do
+					local found = {}
+					for f in string.gmatch(lib, meta.."([%w_]+)%s*%b()") do
+						found[f] = true
+					end
+					if table.IsEmpty(found) then continue end
+
+					for _, v in ipairs(badfuncs) do
+						if found[v] then
+							print(meta..v.." needs to be handled differently")
+							found[v] = nil
+						end
+					end
+
+					local list = table.GetKeys(found)
+					table.sort(list)
+					local metatbl = string.upper(meta).."META"
+					local a, b = {}, {}
+					for i, method in ipairs(list) do
+						a[i] = meta..method
+						b[i] = metatbl.."."..method
+					end
+					print("local " .. table.concat(a, ",") .. " = " .. table.concat(b, ","))
+				end
+			end)
+		end
 
 	else
 		net.Receive("sf_receivelibrary", function(len)
-			local init = net.ReadBool()
 			net.ReadStarfall(nil, function(ok, data)
 				if ok then
-					if not init then
-						SF.Modules[data.mainfile] = {}
-						print("Reloaded library: " .. data.mainfile)
-					end
+					SF.ReloadingLibrary = true
+					SF.Modules[data.mainfile] = {}
+					print("Reloaded library: " .. data.mainfile)
 					for k, code in pairs(data.files) do
 						local modname, path = string.match(k, "(.+):(.+)")
 						local t = SF.Modules[modname]
@@ -1991,8 +2569,10 @@ do
 						t2.source = code
 						if shouldrun then
 							t2.init = compileModule(code, path)
+							SF.Permissions.loadPermissions()
 						end
 					end
+					SF.ReloadingLibrary = false
 				end
 			end)
 		end)

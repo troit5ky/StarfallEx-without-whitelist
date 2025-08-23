@@ -8,22 +8,13 @@ registerprivilege("sound.create", "Sound", "Allows the user to create sounds", {
 local plyCount = SF.LimitObject("sounds", "sounds", 20, "The number of sounds allowed to be playing via Starfall client at once")
 local plySoundBurst = SF.BurstObject("sounds", "sounds", 10, 5, "The rate at which the burst regenerates per second.", "The number of sounds allowed to be made in a short interval of time via Starfall scripts for a single instance ( burst )")
 
-SF.ResourceCounters.Sounds = {icon = "icon16/sound.png", count = function(ply) return plyCount:get(ply).val end}
+SF.ResourceCounters.Sounds = {icon = "icon16/sound.png", count = function(ply) return plyCount:get(ply) end}
 
 local soundsByEntity = SF.EntityTable("soundsByEntity", function(e, t)
 	for snd, _ in pairs(t) do
 		snd:Stop()
 	end
 end, true)
-
-local function deleteSound(ply, ent, sound)
-	sound:Stop()
-	plyCount:free(ply, 1)
-	if soundsByEntity[ent] then
-		soundsByEntity[ent][sound] = nil
-	end
-end
-
 
 --- Sound library.
 -- @name sound
@@ -41,22 +32,40 @@ SF.RegisterType("Sound", true, false)
 return function(instance)
 local checkpermission = instance.player ~= SF.Superuser and SF.Permissions.check or function() end
 
+local sound_library = instance.Libraries.sound
+local sound_methods, sound_meta, wrap, unwrap = instance.Types.Sound.Methods, instance.Types.Sound, instance.Types.Sound.Wrap, instance.Types.Sound.Unwrap
+local ent_meta, ewrap, eunwrap = instance.Types.Entity, instance.Types.Entity.Wrap, instance.Types.Entity.Unwrap
+
 local sounds = {}
+local function registerSound(ent, sound)
+	local sndsByEnt = soundsByEntity[ent]
+	if not sndsByEnt then sndsByEnt = {} soundsByEntity[ent] = sndsByEnt end
+	sndsByEnt[sound] = true
+	sounds[sound] = ent
+end
+
+local function destroySound(sound)
+	sound:Stop()
+	local ent = sounds[sound]
+	if ent then
+		sounds[sound] = nil
+		plyCount:free(instance.player, 1)
+		if soundsByEntity[ent] then
+			soundsByEntity[ent][sound] = nil
+		end
+	end
+end
+
 local getent
 instance:AddHook("initialize", function()
 	getent = instance.Types.Entity.GetEntity
 end)
 
 instance:AddHook("deinitialize", function()
-	for s, ent in pairs(sounds) do
-		deleteSound(instance.player, ent, s)
+	for s in pairs(sounds) do
+		destroySound(s)
 	end
 end)
-
-local sound_library = instance.Libraries.sound
-local sound_methods, sound_meta, wrap, unwrap = instance.Types.Sound.Methods, instance.Types.Sound, instance.Types.Sound.Wrap, instance.Types.Sound.Unwrap
-local ent_meta, ewrap, eunwrap = instance.Types.Entity, instance.Types.Entity.Wrap, instance.Types.Entity.Unwrap
-
 
 --- Creates a sound and attaches it to an entity
 -- @param Entity ent Entity to attach sound to.
@@ -66,12 +75,9 @@ local ent_meta, ewrap, eunwrap = instance.Types.Entity, instance.Types.Entity.Wr
 function sound_library.create(ent, path, nofilter)
 	checkluatype(path, TYPE_STRING)
 	if nofilter~=nil then checkluatype(nofilter, TYPE_BOOL) end
+	SF.CheckSound(instance.player, path)
 
 	checkpermission(instance, { ent, path }, "sound.create")
-
-	if path:match('["?]') then
-		SF.Throw("Invalid sound path: " .. path, 2)
-	end
 
 	local e = getent(ent)
 
@@ -83,13 +89,10 @@ function sound_library.create(ent, path, nofilter)
 		filter = RecipientFilter()
 		filter:AddAllPlayers()
 	end
-	local soundPatch = CreateSound(e, path, filter)
-	local snds = soundsByEntity[e]
-	if not snds then snds = {} soundsByEntity[e] = snds end
-	snds[soundPatch] = true
-	sounds[soundPatch] = e
 
-	return wrap(soundPatch)
+	local sound = CreateSound(e, path, filter)
+	registerSound(e, sound)
+	return wrap(sound)
 end
 
 
@@ -113,6 +116,14 @@ function sound_library.duration(path)
     return SoundDuration(path)
 end
 
+--- Returns true if the sound or sound property exists.
+-- @param string path String path to the sound file
+-- @return boolean True if exists, false if not
+function sound_library.exists(path)
+    checkluatype(path, TYPE_STRING)
+    return istable(sound.GetProperties(path)) or file.Exists("sound/" .. path, "GAME")
+end
+
 --------------------------------------------------
 
 --- Starts to play the sound.
@@ -134,16 +145,9 @@ end
 --- Removes the sound from the game so new one can be created if limit is reached
 function sound_methods:destroy()
 	local snd = unwrap(self)
-	if snd and sounds[snd] then
-		deleteSound(instance.player, sounds[snd], snd)
-		sounds[snd] = nil
-		local sensitive2sf, sf2sensitive = sound_meta.sensitive2sf, sound_meta.sf2sensitive
-		sensitive2sf[snd] = nil
-		sf2sensitive[self] = nil
-		debug.setmetatable(self, nil)
-	else
-		SF.Throw("Tried to destroy invalid sound", 2)
-	end
+	destroySound(snd)
+	sound_meta.sf2sensitive[self] = nil
+	sound_meta.sensitive2sf[snd] = nil
 end
 
 --- Sets the volume of the sound. Won't work unless the sound is playing.

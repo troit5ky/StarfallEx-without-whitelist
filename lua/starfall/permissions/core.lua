@@ -8,8 +8,12 @@ local P = SF.Permissions
 P.privileges = {}
 P.providers = {}
 P.settings = setmetatable({},{__index = function(t,k) local r={} t[k]=r return r end})
-P.filename = SERVER and "sf_perms2_sv.txt" or "sf_perms2_cl.txt"
+P.filename = SERVER and "sf_perms_sv.txt" or "sf_perms_cl.txt"
 
+do -- Delete old settings due to setting issues with new defaults
+	local t = file.Time(P.filename, "DATA")
+	if t>0 and t<1748452637 then file.Delete(P.filename) end
+end
 
 local Privilege = {
 	__index = {
@@ -20,19 +24,22 @@ local Privilege = {
 			local overridable = false
 			for providerid in pairs(self.providerconfig) do
 				local provider = P.providers[providerid]
-				local check = provider.checks[P.settings[self.id][providerid]]
-				if provider.overridable then overridable = true end
-				if check == "block" then
-					if overridable then
-						checks[#checks+1] = function() return false, "This function's permission is blocked!" end
-					else
-						allAllow = false
-						anyBlock = true
-						break
+				if provider then
+					local check = provider.checks[P.settings[self.id][providerid]]
+					if provider.overridable then overridable = true end
+					if check == "block" then
+						if overridable then
+							check = function() return false, "This function's permission is blocked!" end
+						else
+							allAllow = false
+							anyBlock = true
+							break
+						end
 					end
-				elseif check ~= "allow" then
-					allAllow = false
-					checks[#checks+1] = check
+					if check ~= "allow" then
+						allAllow = false
+						checks[#checks+1] = check
+					end
 				end
 			end
 
@@ -73,10 +80,13 @@ local Privilege = {
 		initSettings = function(self)
 			local saveSettings = false
 			for providerid, config in pairs(self.providerconfig) do
-				local setting = P.settings[self.id][providerid]
-				if not setting or not P.providers[providerid].checks[setting] then
-					P.settings[self.id][providerid] = config.default or P.providers[providerid].defaultsetting
-					saveSettings = true
+				local provider = P.providers[providerid]
+				if provider then
+					local setting = P.settings[self.id][providerid]
+					if not setting or not provider.checks[setting] then
+						P.settings[self.id][providerid] = config.default or provider.defaultsetting
+						saveSettings = true
+					end
 				end
 			end
 			self:buildcheck()
@@ -87,27 +97,24 @@ local Privilege = {
 		if not providerconfig then providerconfig = {} end
 		if not providerconfig.usergroups then providerconfig.usergroups = {} end
 
-		for providerid in pairs(providerconfig) do
-			if not P.providers[providerid] then
-				providerconfig[providerid] = nil
-			end
-		end
-
 		return setmetatable({
 			id = id,
 			name = name,
 			description = description,
-			providerconfig = providerconfig
+			providerconfig = providerconfig,
+			check = function() error("Check function isn't set! id="..id.." name="..name) end
 		}, p)
 	end
 }
 setmetatable(Privilege, Privilege)
 
 function P.registerProvider(provider)
+	if P.providers[provider.id] and not SF.ReloadingLibrary then ErrorNoHaltWithStack("Registering same provider more than once! "..name) end
 	P.providers[provider.id] = provider
 end
 
 function P.registerPrivilege(id, name, description, providerconfig)
+	if P.privileges[id] and not SF.ReloadingLibrary then ErrorNoHaltWithStack("Registering same privilege more than once! "..name) end
 	P.privileges[id] = Privilege(id, name, description, providerconfig)
 end
 
@@ -132,39 +139,51 @@ function P.refreshSettingsCache()
 	end
 end
 
-local invalidators = {
-	[1669008186] = { -- Nov 21, 2022
-		message = "HTTP's URL whitelisting was misconfigured, and set by default to Disabled",
-		realm = CLIENT,
-		invalidate = {"http.get", "http.post"},
-		check = function()
-			return P.settings["http.get"]["urlwhitelist"] == 2 or P.settings["http.post"]["urlwhitelist"] == 2
-		end
-	}
-}
+local invalidators = {}
 
 local printC = function(...) (SERVER and MsgC or chat.AddText)(Color(255, 255, 255), "[", Color(11, 147, 234), "Starfall", Color(255, 255, 255), "]: ", ...) if SERVER then MsgC("\n") end end
 
 function P.savePermissions()
-	file.Write(P.filename, util.TableToJSON(P.settings))
+	local meta = getmetatable(P.settings)
+	setmetatable(P.settings, nil)
+	file.Write(P.filename, util.TableToJSON(P.settings, true))
+	setmetatable(P.settings, meta)
 end
 
 -- Load the permission settings for each provider
 function P.loadPermissions()
+	if not pcall(P.loadPermissionsSafe) then
+		-- Errored, try deleting the old config and trying again
+		file.Delete(P.filename, "DATA")
+		pcall(P.loadPermissionsSafe)
+	end
+end
+function P.loadPermissionsSafe()
 	local saveSettings = not file.Exists(P.filename, "DATA")
 	P.settings = setmetatable(util.JSONToTable(file.Read(P.filename) or "") or {}, getmetatable(P.settings))
 
-	local settingsTime = file.Time(P.filename, "DATA") or math.huge
-	for issueTime, issue in pairs(invalidators) do
-		if settingsTime < issueTime and issue.realm and (issue.check == nil or issue.check()) then 
-			printC("Your configuration has been modified due to a misconfiguration.")
-			printC("Reason: " .. issue.message)
-			printC("Changes: " .. table.concat(issue.invalidate, ", "))
+	local version = tonumber(P.settings.version) or 1
+	while invalidators[version] do
+		local issue = invalidators[version]
+		if issue.realm then
+			local changed = false
 			for _, v in ipairs(issue.invalidate) do
-				saveSettings = true
-				P.settings[v] = nil
+				if issue.check == nil or issue.check(P.settings[v]) then
+					P.settings[v] = nil
+					changed = true
+				end
+			end
+			if changed then
+				printC("Your configuration has been modified due to a misconfiguration.")
+				printC("Reason: " .. issue.message)
+				printC("Changes: " .. table.concat(issue.invalidate, ", "))
 			end
 		end
+		version = version + 1
+	end
+	if version ~= P.settings.version then
+		P.settings.version = version
+		saveSettings = true
 	end
 
 	for k, v in pairs(P.privileges) do
@@ -177,7 +196,7 @@ function P.loadPermissions()
 end
 
 -- Find and include all provider files.
-do
+function P.includePermissions()
 	local sv_dir = "starfall/permissions/providers_sv/"
 	local sv_files = file.Find(sv_dir.."*.lua", "LUA")
 	local sh_dir = "starfall/permissions/providers_sh/"
@@ -206,7 +225,7 @@ do
 	end
 end
 
-local function changePermission(ply, arg)
+local function changePermission(print, arg)
 	if arg[1] then
 		local privilege = P.privileges[arg[1]]
 		if privilege then
@@ -215,30 +234,34 @@ local function changePermission(ply, arg)
 				if val and val>=1 and val<=#P.providers[arg[2]].settingsoptions then
 					privilege:applySetting(arg[2], math.floor(val))
 				else
-					ply:PrintMessage(HUD_PRINTCONSOLE, "The setting's value is out of bounds or not a number.\n")
+					print("The setting's value is out of bounds or not a number.\n")
 				end
 			else
-				ply:PrintMessage(HUD_PRINTCONSOLE, "Permission, " .. tostring(arg[2]) .. ", couldn't be found.\nHere's a list of permissions.\n")
-				for id, _ in pairs(privilege.providerconfig) do ply:PrintMessage(HUD_PRINTCONSOLE, id.."\n") end
+				print("Permission, " .. tostring(arg[2]) .. ", couldn't be found.\nHere's a list of permissions.\n")
+				for id, _ in pairs(privilege.providerconfig) do print(id.."\n") end
 			end
 		else
-			ply:PrintMessage(HUD_PRINTCONSOLE, "Privilege, " .. tostring(arg[1]) .. ", couldn't be found.\nHere's a list of privileges.\n")
-			for id, _ in SortedPairs(P.privileges) do ply:PrintMessage(HUD_PRINTCONSOLE, id.."\n") end
+			print("Privilege, " .. tostring(arg[1]) .. ", couldn't be found.\nHere's a list of privileges.\n")
+			for id, _ in SortedPairs(P.privileges) do print(id.."\n") end
 		end
 	else
-		ply:PrintMessage(HUD_PRINTCONSOLE, "Usage: sf_permission <privilege> <permission> <value>.\n")
+		print("Usage: sf_permission <privilege> <permission> <value>.\n")
 	end
+end
+
+local function printfunc(ply)
+	return ply:IsValid() and function(msg) ply:PrintMessage(HUD_PRINTCONSOLE, msg) end or Msg
 end
 
 -- Console commands for changing permissions.
 if SERVER then
 	concommand.Add("sf_permission", function(ply, com, arg)
 		if ply:IsValid() and not ply:IsSuperAdmin() then return end
-		changePermission(ply, arg)
+		changePermission(printfunc(ply), arg)
 	end)
 else
 	concommand.Add("sf_permission_cl", function(ply, com, arg)
-		changePermission(ply, arg)
+		changePermission(printfunc(ply), arg)
 	end)
 end
 

@@ -1,7 +1,8 @@
 -- Global to all starfalls
 local checkluatype = SF.CheckLuaType
 local dgetmeta = debug.getmetatable
-
+local Unpack = FindMetaTable("Vector").Unpack
+local SetUnpacked = FindMetaTable("Vector").SetUnpacked
 
 --- Vector type
 -- @name Vector
@@ -11,9 +12,9 @@ local dgetmeta = debug.getmetatable
 -- @field z The z value of the vector. Can also be indexed with [3]
 -- @libtbl vec_methods
 -- @libtbl vec_meta
-SF.RegisterType("Vector", nil, nil, debug.getregistry().Vector, nil, function(checktype, vec_meta)
+SF.RegisterType("Vector", nil, nil, FindMetaTable("Vector"), nil, function(checktype, vec_meta)
 	return function(vec)
-		return setmetatable({ vec:Unpack() }, vec_meta)
+		return setmetatable({ Unpack(vec) }, vec_meta)
 	end,
 	function(obj)
 		checktype(obj, vec_meta, 2)
@@ -38,6 +39,15 @@ local quatMul
 instance:AddHook("initialize", function()
 	quatMul = instance.Types.Quaternion.QuaternionMultiply
 end)
+
+local function QuickUnwrapper()
+	local Vec = Vector()
+	return function(v) SetUnpacked(Vec, v[1], v[2], v[3]) return Vec end
+end
+vec_meta.QuickUnwrap1 = QuickUnwrapper()
+vec_meta.QuickUnwrap2 = QuickUnwrapper()
+vec_meta.QuickUnwrap3 = QuickUnwrapper()
+vec_meta.QuickUnwrap4 = QuickUnwrapper()
 
 
 --- Creates a Vector struct.
@@ -189,10 +199,20 @@ function vec_meta.__eq(a, b)
 	return a[1]==b[1] and a[2]==b[2] and a[3]==b[3]
 end
 
+local math_asin, math_atan2, math_sqrt = math.asin, math.atan2, math.sqrt
+local rad2deg = 180 / math.pi
+
 --- Get the vector's angle.
 -- @return Angle Angle representing the vector
 function vec_methods:getAngle()
-	return awrap(unwrap(self):Angle())
+	local n = math_sqrt(self[1]^2 + self[2]^2 + self[3]^2)
+	if n == 0 then return setmetatable({0, 0, 0}, ang_meta) end
+
+	return setmetatable({
+		rad2deg * math_asin(-self[3] / n) % 360,
+		rad2deg * math_atan2(self[2], self[1]) % 360,
+		0
+	}, ang_meta)
 end
 
 --- Returns the vector's euler angle with respect to the other vector as if it were the new vertical axis.
@@ -208,8 +228,6 @@ end
 function vec_methods:cross(v)
 	return wrap({ self[2] * v[3] - self[3] * v[2], self[3] * v[1] - self[1] * v[3], self[1] * v[2] - self[2] * v[1] })
 end
-
-local math_sqrt = math.sqrt
 
 --- Returns the pythagorean distance between the vector and the other vector.
 -- @param Vector v Second Vector
@@ -380,26 +398,32 @@ function vec_methods:normalize()
 	self[3] = self[3] / len
 end
 
+local math_sin, math_cos = math.sin, math.cos
+local deg2rad = math.pi/180
+
 --- Rotate the vector by Angle b.
 -- Self-Modifies. Does not return anything
 -- @param Angle b Angle to rotate by.
 function vec_methods:rotate(b)
-	local vec = unwrap(self)
-	vec:Rotate(aunwrap(b))
+	checktype(b, ang_meta)
+	local p, y, r = b[1] * deg2rad, b[2] * deg2rad, b[3] * deg2rad
+	local ysin, ycos, psin, pcos, rsin, rcos = math_sin(y), math_cos(y), math_sin(p), math_cos(p), math_sin(r), math_cos(r)
+	local psin_rsin, psin_rcos = psin*rsin, psin*rcos
+	local x, y, z = self[1], self[2], self[3]
 
-	self[1] = vec.x
-	self[2] = vec.y
-	self[3] = vec.z
+	self[1] = x * (ycos * pcos) + y * (ycos * psin_rsin - ysin * rcos) + z * (ycos * psin_rcos + ysin * rsin)
+	self[2] = x * (ysin * pcos) + y * (ysin * psin_rsin + ycos * rcos) + z * (ysin * psin_rcos - ycos * rsin)
+	self[3] = x * (-psin) + y * (pcos * rsin) + z * (pcos * rcos)
 end
 
 --- Returns Rotated vector by Angle b
 -- @param Angle b Angle to rotate by.
 -- @return Vector Rotated Vector
 function vec_methods:getRotated(b)
-	local vec = unwrap(self)
-	vec:Rotate(aunwrap(b))
-
-	return wrap({ vec.x, vec.y, vec.z })
+	checktype(b, ang_meta)
+	local v = wrap({self[1], self[2], self[3]})
+	vec_methods.rotate(v, b)
+	return v
 end
 
 --- Returns an arbitrary orthogonal basis from the direction of the vector. Input must be a normalized vector
@@ -462,12 +486,6 @@ function vec_methods:set(v)
 	self[3] = v[3]
 end
 
---- Translates the vectors position into 2D user screen coordinates.
--- @return table A table {x=screenx,y=screeny,visible=visible}
-function vec_methods:toScreen()
-	return unwrap(self):ToScreen()
-end
-
 --- Converts vector to color
 -- @return Color New color object
 function vec_methods:getColor()
@@ -492,6 +510,13 @@ if SERVER then
 	-- @return boolean True/False.
 	function vec_methods:isInWorld()
 		return util.IsInWorld(unwrap(self))
+	end
+else
+	--- Translates the vectors position into 2D user screen coordinates.
+	-- @client
+	-- @return table A table {x=screenx,y=screeny,visible=visible}
+	function vec_methods:toScreen()
+		return unwrap(self):ToScreen()
 	end
 end
 

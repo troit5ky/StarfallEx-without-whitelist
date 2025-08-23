@@ -29,6 +29,7 @@ SF.RegisterType("Effect", true, false)
 
 return function(instance)
 local checkpermission = instance.player ~= SF.Superuser and SF.Permissions.check or function() end
+local checkvector = SF.CheckVector
 
 local effect_library = instance.Libraries.effect
 local effect_methods, effect_meta, wrap, unwrap = instance.Types.Effect.Methods, instance.Types.Effect, instance.Types.Effect.Wrap, instance.Types.Effect.Unwrap
@@ -38,8 +39,12 @@ local ang_meta, awrap, aunwrap = instance.Types.Angle, instance.Types.Angle.Wrap
 local vec_meta, vwrap, vunwrap = instance.Types.Vector, instance.Types.Vector.Wrap, instance.Types.Vector.Unwrap
 
 local getent
+local vunwrap1
+local aunwrap1
 instance:AddHook("initialize", function()
 	getent = instance.Types.Entity.GetEntity
+	vunwrap1 = vec_meta.QuickUnwrap1
+	aunwrap1 = ang_meta.QuickUnwrap1
 end)
 
 --- Creates an effect data structure
@@ -58,6 +63,38 @@ end
 -- @return boolean If an effect can be played
 function effect_library.canCreate()
 	return plyEffectBurst:check(instance.player)>=1
+end
+
+--- Creates a "beam ring point" effect, like the AR2 orb explosion
+-- @param Vector pos The origin position of the effect
+-- @param number lifetime How long the effect will be drawing for, in seconds
+-- @param number startRad Initial radius of the effect
+-- @param number endRad Final radius of the effect
+-- @param number width How thick the beam should be
+-- @param number amplitude How noisy the beam should be
+-- @param Color color Color
+-- @param number? speed Causes the beam to start faded if set to any integer other than 0
+-- @param number? flags Beam flags
+-- @param number? framerate Texture framerate
+-- @param string? material The material to use instead of the default one
+function effect_library.beamRingPoint(pos, lifetime, startRad, endRad, width, amplitude, color, speed, flags, framerate, material)
+	pos = vunwrap1(pos)
+	checkvector(pos)
+	
+	checkpermission(instance, nil, "effect.play")
+	plyEffectBurst:use(instance.player, 1)
+	
+	lifetime = math.Clamp(lifetime, 0, 25.6)
+	startRad = math.Clamp(startRad, -4096, 4096)
+	endRad = math.Clamp(endRad, -4096, 4096)
+	width = math.Clamp(width, 0, 128)
+	amplitude = math.Clamp(amplitude, 0, 64)
+
+	effects.BeamRingPoint(pos, lifetime, startRad, endRad, width, amplitude, cunwrap(color), {
+		speed = speed and math.Clamp(speed, 0, 255) or nil,
+		flags = flags,
+		framerate = framerate and math.Clamp(framerate, 0, 255) or nil,
+		material = material})
 end
 
 --- Plays the effect
@@ -174,7 +211,7 @@ end
 --- Sets the effect's angles
 -- @param Angle ang The angles
 function effect_methods:setAngles(ang)
-	unwrap(self):SetAngles(aunwrap(ang))
+	unwrap(self):SetAngles(aunwrap1(ang))
 end
 
 --- Sets the effect's attachment
@@ -243,13 +280,13 @@ end
 --- Sets the effect's normal
 -- @param Vector normal The vector normal
 function effect_methods:setNormal(normal)
-	unwrap(self):SetNormal(vunwrap(normal))
+	unwrap(self):SetNormal(vunwrap1(normal))
 end
 
 --- Sets the effect's origin
 -- @param Vector origin The vector origin
 function effect_methods:setOrigin(origin)
-	unwrap(self):SetOrigin(vunwrap(origin))
+	unwrap(self):SetOrigin(vunwrap1(origin))
 end
 
 --- Sets the effect's radius
@@ -270,7 +307,7 @@ end
 -- Limited to world bounds (+-16386 on every axis) and has horrible networking precision. (17 bit float per component)
 -- @param Vector start The vector start
 function effect_methods:setStart(start)
-	unwrap(self):SetStart(vunwrap(start))
+	unwrap(self):SetStart(vunwrap1(start))
 end
 
 --- Sets the effect's surface property

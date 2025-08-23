@@ -1,6 +1,7 @@
 -- Global to all starfalls
 local net = net
 local checkluatype = SF.CheckLuaType
+local IsValid = FindMetaTable("Entity").IsValid
 
 local streams = SF.EntityTable("playerStreams")
 local netBurst = SF.BurstObject("net", "net message", 5, 10, "Regen rate of net message burst in kB/sec.", "The net message burst limit in kB.", 1000 * 8)
@@ -12,11 +13,11 @@ end
 
 net.Receive("SF_netmessage", function(len, ply)
 	local ent = net.ReadEntity()
-	if ent:IsValid() then
+	if IsValid(ent) then
 		local instance = ent.instance
 		if instance and instance.runScriptHook then
 			local name = net.ReadString()
-			len = len - 16 - (#name + 1) * 8 -- This gets rid of the 2-byte entity, and the null-terminated string, making this now quantify the length of the user's net message
+			len = len - MAX_EDICT_BITS - (#name + 1) * 8 -- This gets rid of the 2-byte entity, and the null-terminated string, making this now quantify the length of the user's net message
 			instance.data.net.ply = ply
 			if ply then ply = instance.Types.Player.Wrap(ply) end
 
@@ -40,16 +41,6 @@ SF.RegisterLibrary("net")
 
 return function(instance)
 
-local getent
-local netStarted = false
-local netSize = 0
-local netData
-local netReceives = {}
-instance.data.net = {receives = netReceives}
-instance:AddHook("initialize", function()
-	getent = instance.Types.Entity.GetEntity
-end)
-
 local net_library = instance.Libraries.net
 local ents_methods, ent_meta, ewrap, eunwrap = instance.Types.Entity.Methods, instance.Types.Entity, instance.Types.Entity.Wrap, instance.Types.Entity.Unwrap
 local ang_meta, awrap, aunwrap = instance.Types.Angle, instance.Types.Angle.Wrap, instance.Types.Angle.Unwrap
@@ -57,9 +48,33 @@ local vec_meta, vwrap, vunwrap = instance.Types.Vector, instance.Types.Vector.Wr
 local col_meta, cwrap, cunwrap = instance.Types.Color, instance.Types.Color.Wrap, instance.Types.Color.Unwrap
 local mtx_meta, mwrap, munwrap = instance.Types.VMatrix, instance.Types.VMatrix.Wrap, instance.Types.VMatrix.Unwrap
 
-local function write(func, size, ...)
-	netSize = netSize + size
-	netData[#netData + 1] = { func, { ... } }
+local getent
+local vunwrap1
+local netStarted = false
+local netSize = 0
+local netData
+local netReceives = {}
+instance.data.net = {receives = netReceives}
+instance:AddHook("initialize", function()
+	getent = instance.Types.Entity.GetEntity
+	vunwrap1 = vec_meta.QuickUnwrap1
+end)
+
+local function write(data)
+	netSize = netSize + data[2]
+	netData[#netData + 1] = data
+end
+
+local function net_write(unreliable)
+	net.Start("SF_netmessage", unreliable)
+	net.WriteEntity(instance.entity)
+	for _, v in ipairs(netData) do
+		v[1](unpack(v, 3))
+	end
+
+	netSize = 0
+	netData = {}
+	netStarted = false
 end
 
 --- Starts the net message
@@ -73,48 +88,33 @@ function net_library.start(name)
 	netSize = 8*8 -- 8 byte overhead
 	netData = {}
 
-	write(net.WriteString, (#name + 1) * 8, name) -- Include null character
+	write{net.WriteString, (#name + 1) * 8, name} -- Include null character
 end
 
 --- Send a net message from client->server, or server->client.
 -- @shared
--- @param Entity|table|nil target Optional target location to send the net message. Entity or table of targets. If nil, sends to server on client
+-- @param Player|table|nil target Optional target location to send the net message. Player or table of targets. If nil, sends to server on client
 -- @param boolean? unreliable Optional choose whether it's more important for the message to actually reach its destination (false) or reach it as fast as possible (true).
 function net_library.send(target, unreliable)
-	if target~=nil then checkluatype(target, TYPE_TABLE) end
 	if unreliable~=nil then checkluatype(unreliable, TYPE_BOOL) end
 	if not netStarted then SF.Throw("net message not started", 2) end
 
 	local newtarget
-	if SERVER then
-		if target then
-			newtarget = instance.UnwrapObject(target)
-			if newtarget then
-				if not (newtarget.IsValid and newtarget.IsPlayer and newtarget:IsValid() and newtarget:IsPlayer()) then SF.Throw("Invalid player", 2) end
-			else
-				if #target == 0 then SF.Throw("Send array is empty", 2) end
-				newtarget = {}
-				for i = 1, #target do
-					local pl = eunwrap(target[i])
-					if pl:IsValid() and pl:IsPlayer() then
-						newtarget[i] = pl
-					else
-						SF.Throw("Invalid player inside send array", 2)
-					end
-				end
+	if SERVER and target then
+		checkluatype(target, TYPE_TABLE)
+		if debug.getmetatable(target)==instance.Types.Player then
+			newtarget = instance.Types.Player.GetPlayer(target)
+		else
+			newtarget = {}
+			for i, pl in ipairs(target) do
+				newtarget[i] = instance.Types.Player.GetPlayer(pl)
 			end
 		end
 	end
 
 	netBurst:use(instance.player, netSize)
+	net_write(unreliable)
 
-	net.Start("SF_netmessage", unreliable)
-	net.WriteEntity(instance.entity)
-	local data = netData
-	for i = 1, #data do
-		local args = data[i][2]
-		data[i][1](unpack(args, 1, table.maxn(args)))
-	end
 	if SERVER then
 		if newtarget then
 			net.Send(newtarget)
@@ -125,10 +125,23 @@ function net_library.send(target, unreliable)
 		net.SendToServer()
 	end
 
-	netSize = 0
-	netData = {}
-	netStarted = false
 	instance:checkCpu()
+end
+
+if SERVER then
+	--- Send net message to all players within the visible area of a vector
+	-- @server
+	-- @param Vector pos A vector within the PVS area to send a message
+	-- @param boolean? unreliable Optional choose whether it's more important for the message to actually reach its destination (false) or reach it as fast as possible (true).
+	function net_library.sendPVS(pos, unreliable)
+		if not netStarted then SF.Throw("net message not started", 2) end
+		pos = vunwrap1(pos)
+
+		netBurst:use(instance.player, netSize)
+		net_write(unreliable)
+		net.SendPVS(pos)
+		instance:checkCpu()
+	end
 end
 
 --- Writes an object to a net message automatically typing it
@@ -138,8 +151,8 @@ function net_library.writeType(v)
 	if not netStarted then SF.Throw("net message not started", 2) end
 
 	local str = util.Compress(SF.TableToString({v}, instance))
-	write(net.WriteUInt, 32, #str, 32)
-	write(net.WriteData, #str*8, str, #str)
+	write{net.WriteUInt, 32, #str, 32}
+	write{net.WriteData, #str*8, str, #str}
 end
 
 --- Reads an object from a net message automatically typing it
@@ -158,8 +171,8 @@ function net_library.writeTable(t)
 	checkluatype(t, TYPE_TABLE)
 
 	local str = util.Compress(SF.TableToString(t, instance))
-	write(net.WriteUInt, 32, #str, 32)
-	write(net.WriteData, #str*8, str, #str)
+	write{net.WriteUInt, 32, #str, 32}
+	write{net.WriteData, #str*8, str, #str}
 end
 
 --- Reads an table from a net message automatically typing it
@@ -178,7 +191,7 @@ function net_library.writeString(t)
 
 	checkluatype (t, TYPE_STRING)
 
-	write(net.WriteString, (#t+1)*8, t)
+	write{net.WriteString, (#t+1)*8, t}
 end
 
 --- Reads a string from the net message
@@ -199,7 +212,7 @@ function net_library.writeData(t, n)
 	checkluatype (n, TYPE_NUMBER)
 
 	n = math.Clamp(n, 0, 64000)
-	write(net.WriteData, n*8, t, n)
+	write{net.WriteData, n*8, t, n}
 end
 
 --- Reads a string from the net message
@@ -220,7 +233,7 @@ function net_library.writeStream(str, compress)
 	if not netStarted then SF.Throw("net message not started", 2) end
 	checkluatype (str, TYPE_STRING)
 	if #str > 64e6 then SF.Throw("String is too long!") end
-	write(net.WriteStream, 8*8, str, nil, compress == false)
+	write{net.WriteStream, 8*8, str, function() end, compress == false}
 end
 
 --- Reads a large string stream from the net message.
@@ -230,17 +243,9 @@ function net_library.readStream(cb)
 	checkluatype (cb, TYPE_FUNCTION)
 	if streams[instance.player] then SF.Throw("The previous stream must finish before reading another.", 2) end
 
-	local streamOwner, target
-	if instance.player ~= SF.Superuser then
-		streamOwner = instance.player
-		target = instance.player
-	else
-		streamOwner = SF.Superuser
-		target = instance.data.net.ply
-	end
-	streams[streamOwner] = net.ReadStream((SERVER and target or nil), function(data)
+	streams[instance.player] = net.ReadStream((SERVER and instance.data.net.ply or nil), function(data)
 		instance:runFunction(cb, data)
-		streams[streamOwner] = nil
+		streams[instance.player] = nil
 	end)
 end
 
@@ -270,7 +275,7 @@ function net_library.writeInt(t, n)
 	checkluatype (n, TYPE_NUMBER)
 
 	n = math.Clamp(n, 0, 32)
-	write(net.WriteInt, n, t, n)
+	write{net.WriteInt, n, t, n}
 end
 
 --- Reads an integer from the net message
@@ -293,7 +298,7 @@ function net_library.writeUInt(t, n)
 	checkluatype (n, TYPE_NUMBER)
 
 	n = math.Clamp(n, 0, 32)
-	write(net.WriteUInt, n, t, n)
+	write{net.WriteUInt, n, t, n}
 end
 
 --- Reads an unsigned integer from the net message
@@ -305,6 +310,24 @@ function net_library.readUInt(n)
 	return net.ReadUInt(n)
 end
 
+--- Writes an unsigned 64-bit integer to the net message
+-- @shared
+-- @param string t The 64-bit integer written as a string because lua numbers can't hold 64-bit ints
+function net_library.writeUInt64(t)
+	if not netStarted then SF.Throw("net message not started", 2) end
+
+	checkluatype (t, TYPE_STRING)
+
+	write{net.WriteUInt64, 64, t}
+end
+
+--- Reads an unsigned 64-bit integer from the net message
+-- @shared
+-- @return string The unsigned integer that was read, as a string
+function net_library.readUInt64()
+	return net.ReadUInt64()
+end
+
 --- Writes a bit to the net message
 -- @shared
 -- @param number t The bit to be written. (0 for false, 1 (or anything) for true)
@@ -313,7 +336,7 @@ function net_library.writeBit(t)
 
 	checkluatype (t, TYPE_NUMBER)
 
-	write(net.WriteBit, 1, t~=0)
+	write{net.WriteBit, 1, t~=0}
 end
 
 --- Reads a bit from the net message
@@ -331,7 +354,7 @@ function net_library.writeBool(t)
 
 	checkluatype (t, TYPE_BOOL)
 
-	write(net.WriteBool, 1, t)
+	write{net.WriteBool, 1, t}
 end
 
 --- Reads a boolean from the net message
@@ -349,7 +372,7 @@ function net_library.writeDouble(t)
 
 	checkluatype (t, TYPE_NUMBER)
 
-	write(net.WriteDouble, 8*8, t)
+	write{net.WriteDouble, 8*8, t}
 end
 
 --- Reads a double from the net message
@@ -367,7 +390,7 @@ function net_library.writeFloat(t)
 
 	checkluatype (t, TYPE_NUMBER)
 
-	write(net.WriteFloat, 4*8, t)
+	write{net.WriteFloat, 4*8, t}
 end
 
 --- Reads a float from the net message
@@ -382,9 +405,9 @@ end
 -- @param Angle t The angle to be written
 function net_library.writeAngle(t)
 	if not netStarted then SF.Throw("net message not started", 2) end
-	write(net.WriteFloat, 4*8, t[1])
-	write(net.WriteFloat, 4*8, t[2])
-	write(net.WriteFloat, 4*8, t[3])
+	write{net.WriteFloat, 4*8, t[1]}
+	write{net.WriteFloat, 4*8, t[2]}
+	write{net.WriteFloat, 4*8, t[3]}
 end
 
 --- Reads an angle from the net message
@@ -399,9 +422,9 @@ end
 -- @param Vector t The vector to be written
 function net_library.writeVector(t)
 	if not netStarted then SF.Throw("net message not started", 2) end
-	write(net.WriteFloat, 4*8, t[1])
-	write(net.WriteFloat, 4*8, t[2])
-	write(net.WriteFloat, 4*8, t[3])
+	write{net.WriteFloat, 4*8, t[1]}
+	write{net.WriteFloat, 4*8, t[2]}
+	write{net.WriteFloat, 4*8, t[3]}
 end
 
 --- Reads a vector from the net message
@@ -418,7 +441,7 @@ function net_library.writeMatrix(t)
 	if not netStarted then SF.Throw("net message not started", 2) end
 	local vals = {munwrap(t):Unpack()}
 	for i=1, 16 do
-		write(net.WriteFloat, 4*8, vals[i])
+		write{net.WriteFloat, 4*8, vals[i]}
 	end
 end
 
@@ -436,7 +459,7 @@ end
 -- @param Color t The color to be written
 function net_library.writeColor(t)
 	if not netStarted then SF.Throw("net message not started", 2) end
-	write(net.WriteColor, 4*8, cunwrap(t))
+	write{net.WriteColor, 4*8, cunwrap(t)}
 end
 
 --- Reads a color from the net message
@@ -451,7 +474,9 @@ end
 -- @param Entity t The entity to be written
 function net_library.writeEntity(t)
 	if not netStarted then SF.Throw("net message not started", 2) end
-	write(net.WriteUInt, 16, getent(t):EntIndex(), 16)
+	local ent = getent(t)
+	write{net.WriteUInt, 16, ent:EntIndex(), 16}
+	write{net.WriteUInt, 32, ent:GetCreationID(), 32}
 end
 
 --- Reads a entity from the net message
@@ -460,9 +485,10 @@ end
 -- @return Entity The entity that was read
 function net_library.readEntity(callback)
 	local index = net.ReadUInt(16)
+	local creationindex = net.ReadUInt(32)
 	if callback ~= nil and CLIENT then
 		checkluatype(callback, TYPE_FUNCTION)
-		SF.WaitForEntity(index, function(ent)
+		SF.WaitForEntity(index, creationindex, function(ent)
 			if ent ~= nil then ent = instance.WrapObject(ent) end
 			instance:runFunction(callback, ent)
 		end)
@@ -502,7 +528,7 @@ end
 end
 
 --- Called when a net message arrives
--- @name net
+-- @name Net
 -- @class hook
 -- @param string name Name of the arriving net message
 -- @param number len Length of the arriving net message in bits

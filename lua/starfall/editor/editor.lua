@@ -60,37 +60,15 @@ if CLIENT then
 	SF.Editor.colors.medlight = Color(127, 178, 240)
 	SF.Editor.colors.light = Color(173, 213, 247)
 
-	local invalid_filename_chars = {
-		["*"] = "",
-		["?"] = "",
-		[">"] = "",
-		["<"] = "",
-		["|"] = "",
-		["\\"] = "",
-		['"'] = "",
-	}
-
 	function SF.Editor.init()
 		if SF.Editor.initialized or SF.Editor.editor then return end
 
-		if not SF.Docs and not SF.WaitingForDocs then
-			SF.WaitingForDocs = true
-			local docfile = file.Open("sf_docs.txt", "rb", "DATA")
-			if docfile then
-				SF.DocsData = docfile:Read(docfile:Size()) or ""
-				docfile:Close()
-			else
-				SF.DocsData = ""
-			end
-			net.Start("starfall_docs")
-			net.WriteString(util.CRC(SF.DocsData))
-			net.SendToServer()
-		end
-
+		SF.Editor.requestDocs()
 		SF.Editor.createEditor()
 		if not SF.Editor.modelViewer then
 			SF.Editor.modelViewer = SF.Editor.createModelViewer()
 		end
+
 		SF.Editor.initialized = true
 	end
 
@@ -155,21 +133,6 @@ if CLIENT then
 		end
 	end
 
-	function SF.Editor.getOpenFiles()
-		local files = {}
-		for i = 1, SF.Editor.editor:GetNumTabs() do
-			local tab = SF.Editor.editor:GetTabContent(i)
-			local path = tab.chosenfile
-			if path and tab.GetCode then
-				if SF.Editor.editor:ShouldReloadBeforeUpload() then
-					SF.Editor.editor:ReloadTabs(false)
-				end
-				files[path:match("starfall/(.+)") or path] = tab:GetCode()
-			end
-		end
-		return files
-	end
-
 	function SF.Editor.createEditor()
 		local editor = vgui.Create("StarfallEditorFrame") --Should define own frame later
 
@@ -219,171 +182,33 @@ if CLIENT then
 		permsPanel:Dock(FILL)
 	end
 
-	--- (Client) Builds a table for the compiler to use
-	-- @param mainfile Manual selection of which file should be main. Otherwise it's the open file
-	-- @return True if ok, false if a file was missing
-	-- @return A table with mainfile name and files
 	function SF.Editor.BuildIncludesTable(mainfile, success, err)
 		if not SF.Editor.initialized then SF.Editor.init() end
 
-		local openfiles = SF.Editor.getOpenFiles()
-		if not (mainfile and (openfiles[mainfile] or file.Exists("starfall/" .. mainfile, "DATA"))) then
+		local opentabs = {}
+		for i = 1, SF.Editor.editor:GetNumTabs() do
+			local tab = SF.Editor.editor:GetTabContent(i)
+			local path = tab.chosenfile
+			if path and tab.GetCode then
+				if SF.Editor.editor:ShouldReloadBeforeUpload() then
+					SF.Editor.editor:ReloadTab(i, false)
+				end
+				opentabs[string.match(path, "starfall/(.+)") or path] = tab
+			end
+		end
+
+		local openfiles = setmetatable({},{__index = function(t,k) if opentabs[k] then local r=opentabs[k]:GetCode() t[k]=r return r end end})
+
+		if not (mainfile and (opentabs[mainfile] or file.Exists("starfall/" .. mainfile, "DATA"))) then
 			mainfile = SF.Editor.getOpenFile() or "main"
 			if #mainfile == 0 then err("Invalid main file") return end
 			openfiles[mainfile] = SF.Editor.getCode()
 		end
 
-		local tbl = {}
-		tbl.mainfile = mainfile
-		tbl.files = {}
-
-		local ppdata = {}
-
-		local function getInclude(path)
-			return openfiles[path] or file.Read("starfall/" .. path, "DATA") or error("Bad include: " .. path)
-		end
-		local function getIncludePath(path, curdir)
-			local path = SF.ChoosePath(path, curdir, function(testpath)
-				return openfiles[testpath] or file.Exists("starfall/" .. testpath, "DATA")
-			end) or error("Bad include: " .. path)
-			return path, string.GetPathFromFilename(path)
-		end
-
-		local function recursiveLoad(codepath, codedir, code, dontParse)
-			if tbl.files[codepath] then return end
-			tbl.files[codepath] = code
-
-			if dontParse then return end
-
-			SF.Preprocessor.ParseDirectives(codepath, code, ppdata)
-
-			local clientmain = ppdata.clientmain and ppdata.clientmain[codepath]
-			if clientmain then
-				clientmain = getIncludePath(clientmain, codedir)
-				if clientmain then ppdata.clientmain[codepath] = clientmain end
-			end
-
-			local dontParseTbl = {}
-			local dataincludes = ppdata.includesdata and ppdata.includesdata[codepath]
-			if dataincludes then
-				for k, v in ipairs(dataincludes) do
-					local datapath = getIncludePath(v, codedir)
-					if datapath then dontParseTbl[datapath] = true end
-				end
-			end
-
-			local includes = ppdata.includes and ppdata.includes[codepath]
-			if includes then
-				for k, v in ipairs(includes) do
-					local codepath, codedir = getIncludePath(v, codedir)
-					local code = getInclude(codepath)
-					recursiveLoad(codepath, codedir, code, dontParseTbl[codepath])
-				end
-			end
-
-			if ppdata.includedirs and ppdata.includedirs[codepath] then
-				local inc = ppdata.includedirs[codepath]
-
-				for i = 1, #inc do
-					local origdir = inc[i]
-					local dir = origdir
-					local files
-					if string.sub(dir, 1, 1)~="/" then
-						dir = SF.NormalizePath(codedir .. origdir)
-						files = file.Find("starfall/" .. dir .. "/*", "DATA")
-					end
-					if not files or #files==0 then
-						dir = SF.NormalizePath(origdir)
-						files = file.Find("starfall/" .. dir .. "/*", "DATA")
-					end
-					for k, v in ipairs(files) do
-						local codepath, codedir = getIncludePath(v, dir.."/")
-						local code = getInclude(codepath)
-						recursiveLoad(codepath, codedir, code, dontParseTbl[codepath])
-					end
-				end
-			end
-		end
-
-		local ok, msg = pcall(function()
-			local codepath, codedir = getIncludePath(mainfile, string.GetPathFromFilename(mainfile))
-			local code = getInclude(codepath)
-			recursiveLoad(codepath, codedir, code)
-		end)
-
-		if not ok then
-			local file = string.match(msg, "(Bad include%: .*)")
-			return err(file or msg)
-		end
-
-		local clientmain = ppdata.clientmain and ppdata.clientmain[tbl.mainfile]
-		if clientmain and not tbl.files[clientmain] then
-			return err("Clientmain not found: " .. clientmain)
-		end
-
-		local includes = ppdata.includes
-		local serverorclient = ppdata.serverorclient
-		if includes and serverorclient then
-			for filename, files in pairs(includes) do
-				for _, inc in ipairs(files) do
-					if serverorclient[inc] and serverorclient[filename] and serverorclient[filename] ~= serverorclient[inc] then
-						return err("Incompatible client/server realm: \""..filename.."\" trying to include \""..inc.."\"")
-					end
-				end
-			end
-		end
-
-		SF.Editor.HandlePostProcessing(tbl, ppdata, success, err)
+		SF.FileLoader(mainfile, openfiles, success, err)
 	end
 
-	--- Handles post-processing (as part of BuildIncludesTable)
-	function SF.Editor.HandlePostProcessing(list, ppdata, onSuccessSignal, onErrorSignal)
-		if not ppdata.httpincludes then onSuccessSignal(list) return end
-		local files = list.files
-		local usingCache, pendingRequestCount = {}, 0 -- a temporary HTTP in-memory cache
-		-- First stage: Iterate through all http --@include directives in all files and prepare our HTTP queue structure.
-		for fileName, fileUsing in next, ppdata.httpincludes do
-			for _, data in next, fileUsing do
-				local url, name = data[1], data[2]
-				if not usingCache[url] then
-					usingCache[url] = name or true -- prevents duplicate requests to the same URL
-					pendingRequestCount = pendingRequestCount + 1
-				end
-			end
-		end
-		-- Second stage: Once we know the total amount of requests and URLs, we fetch all URLs as HTTP resources.
-		--               Then we wait for all HTTP requests to complete.
-		local function CheckAndUploadIfReady()
-			pendingRequestCount = pendingRequestCount - 1
-			if pendingRequestCount > 0 then return end
-			-- The following should run only once, at the end when there are no more pending HTTP requests:
-			-- Final stage: Substitute all http --@include directives with the contents of their HTTP response.
-			for fileName, fileUsing in next, ppdata.httpincludes do
-				local code = files[fileName]
-				for _, data in next, fileUsing do
-					local url, name = data[1], data[2]
-					local result = usingCache[url]
-					files[name] = result
-				end
-			end
-			onSuccessSignal(list)
-		end
-		for url in next, usingCache do
-			HTTP {
-				method = "GET";
-				url = url;
-				success = function(_, contents)
-					usingCache[url] = contents
-					CheckAndUploadIfReady()
-				end;
-				failed = function(reason)
-					onErrorSignal(string.format("Could not fetch --@include link (due %s): %s", reason, url))
-				end;
-			}
-		end
-	end
-
-	function SF.Editor.createModelViewer ()
+	function SF.Editor.createModelViewer()
 		local frame = vgui.Create("StarfallFrame")
 		frame:SetTitle("Model Viewer - Click an icon to insert model filename into editor")
 		frame:SetVisible(false)
@@ -607,7 +432,7 @@ if CLIENT then
 			end
 
 			if table.Count(spawnmenu.GetPropTable()) == 0 then
-				hook.Call("PopulatePropMenu", GAMEMODE)
+				hook.Run("PopulatePropMenu")
 			end
 
 			fillNavBar(spawnmenu.GetPropTable(), root)
@@ -780,6 +605,7 @@ if CLIENT then
 	timer.Create("starfall_editor_status", 1 / 3, 0, function ()
 		rolldelta = -rolldelta
 		for ply, _ in pairs(busy_players) do
+			if not ply:IsValid() then continue end
 			local BoneIndx = ply:LookupBone("ValveBiped.Bip01_Head1") or ply:LookupBone("ValveBiped.HC_Head_Bone") or 0
 			local BonePos, BoneAng = ply:GetBonePosition(BoneIndx)
 			local particle = emitter:Add("radon/starfall2", BonePos + Vector(math.random(-10, 10), math.random(-10, 10), 60 + math.random(0, 10)))
@@ -820,44 +646,54 @@ if CLIENT then
 		print("Editor reloaded")
 	end)
 
-	local function initDocs(data)
-		local ok, docs
-		if data then
-			ok, docs = xpcall(function() return SF.StringToTable(util.Decompress(data)) end, debug.traceback)
+	local retries = 0
+	function SF.Editor.requestDocs()
+		if retries == 3 then
+			SF.AddNotify(LocalPlayer(), "Starfall documentation failed to download after 3 tries!", "ERROR", 7, "ERROR1")
+			return
 		end
+		retries = retries + 1
+
+		if not SF.DocsData then
+			SF.DocsData = file.Read("sf_docs.txt", "DATA") or ""
+		end
+
+		net.Start("starfall_docs") net.WriteString(util.CRC(SF.DocsData)) net.SendToServer()
+	end
+
+	local function initDocs(data)
+		local ok, docs = xpcall(function() return SF.StringToTable(util.Decompress(data)) end, debug.traceback)
 		if ok then
 			SF.Docs = docs
+			SF.DocsData = nil
 			-- reinitialize tabhandler to regenerate libmap
 			SF.Editor.TabHandlers.wire:Init()
 			SF.Editor.TabHandlers.helper:RefreshHelper()
 			-- clear cache to redraw text
 			SF.Editor.editor:OnThemeChange(SF.Editor.Themes.CurrentTheme)
-			SF.WaitingForDocs = nil
 		else
-			if docs then
-				ErrorNoHalt("There was an error decoding the docs. Rejoin to try again.\n" .. docs .. "\n")
-			else
-				ErrorNoHalt("There was an error transmitting the docs. Rejoin to try again.\n")
-			end
-			SF.AddNotify(LocalPlayer(), "Error processing Starfall documentation!", "GENERIC", 7, "DRIP3")
+			SF.DocsData = ""
+			ErrorNoHalt("There was an error decoding the docs:\n" .. tostring(docs) .. "\n")
+			SF.AddNotify(LocalPlayer(), "Error processing Starfall documentation!", "ERROR", 7, "ERROR1")
+			SF.Editor.requestDocs()
 		end
 	end
 	net.Receive("starfall_docs", function(len, ply)
 		if net.ReadBool() then
 			initDocs(SF.DocsData)
-			SF.DocsData = nil
 		else
 			SF.AddNotify(LocalPlayer(), "Downloading Starfall Documentation", "GENERIC", 7, "DRIP3")
 			net.ReadStream(nil, function(data)
-				local docfile = file.Open("sf_docs.txt", "wb", "DATA")
-				if docfile then
-					docfile:Write(data)
-					docfile:Close()
-					SF.AddNotify(LocalPlayer(), "Documentation saved to sf_docs.txt!", "GENERIC", 7, "DRIP3")
+				if data then
+					if file.Write("sf_docs.txt", data) then
+						SF.AddNotify(LocalPlayer(), "Documentation saved to sf_docs.txt!", "GENERIC", 7, "DRIP3")
+					else
+						SF.AddNotify(LocalPlayer(), "Error saving Starfall documentation!", "ERROR", 7, "ERROR1")
+					end
+					initDocs(data)
 				else
-					SF.AddNotify(LocalPlayer(), "Error saving Starfall documentation!", "GENERIC", 7, "DRIP3")
+					SF.Editor.requestDocs()
 				end
-				initDocs(data)
 			end)
 		end
 	end)
@@ -897,15 +733,13 @@ elseif SERVER then
 	end
 
 	net.Receive("starfall_docs", function(len, ply)
-		if not ply.SF_SentDocs then
-			ply.SF_SentDocs = true
-
+		if ply.SF_SentDocs==nil or (istable(ply.SF_SentDocs) and ply.SF_SentDocs.clients[ply].finished) then
 			net.Start("starfall_docs")
 			if SF.DocsCRC == net.ReadString() then
 				net.WriteBool(true)
 			else
 				net.WriteBool(false)
-				net.WriteStream(SF.Docs, nil, true)
+				ply.SF_SentDocs = net.WriteStream(SF.Docs, nil, true)
 			end
 			net.Send(ply)
 		end

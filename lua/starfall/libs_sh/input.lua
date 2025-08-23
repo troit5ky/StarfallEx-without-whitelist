@@ -10,6 +10,7 @@ end
 -- This should manage the player button hooks for singleplayer games.
 local PlayerButtonDown, PlayerButtonUp
 if game.SinglePlayer() then
+	PlayerButtonDown, PlayerButtonUp = "SF_PlayerButtonDown", "SF_PlayerButtonUp"
 	if SERVER then
 		util.AddNetworkString("sf_relayinput")
 
@@ -32,12 +33,14 @@ if game.SinglePlayer() then
 			local down = net.ReadBool()
 			local key = net.ReadInt(16)
 			if down then
-				hook.Run("PlayerButtonDown", LocalPlayer(), key)
+				hook.Run("SF_PlayerButtonDown", LocalPlayer(), key)
 			else
-				hook.Run("PlayerButtonUp", LocalPlayer(), key)
+				hook.Run("SF_PlayerButtonUp", LocalPlayer(), key)
 			end
 		end)
 	end
+else
+	PlayerButtonDown, PlayerButtonUp = "PlayerButtonDown", "PlayerButtonUp"
 end
 if SERVER then
 	util.AddNetworkString("starfall_lock_control")
@@ -48,13 +51,15 @@ registerprivilege("input", "Input", "Allows the user to see what buttons you're 
 registerprivilege("input.chat", "Input", "Allows the user to see your chat keypresses.", { client = { default = 1 } })
 registerprivilege("input.bindings", "Input", "Allows the user to see your bindings.", { client = { default = 1 } })
 registerprivilege("input.emulate", "Input", "Allows starfall to emulate user input.", { client = { default = 1 } })
+registerprivilege("input.lockcontrols", "Input", "Allows starfall to lock game control input.", { client = { default = 5 } })
+registerprivilege("input.enablecursor", "Input", "Allows starfall to enable the game's cursor.", { client = { default = 5 } })
 
 local controlsLocked = false
 local function unlockControls(instance)
 	instance.data.input.controlsLocked = false
 	controlsLocked = false
 	hook.Remove("PlayerBindPress", "sf_keyboard_blockinput")
-	hook.Remove("PlayerButtonDown", "sf_keyboard_unblockinput")
+	hook.Remove(PlayerButtonDown, "sf_keyboard_unblockinput")
 end
 
 local function lockControls(instance)
@@ -65,7 +70,7 @@ local function lockControls(instance)
 	hook.Add("PlayerBindPress", "sf_keyboard_blockinput", function(ply, bind, pressed)
 		if bind ~= "+attack" and bind ~= "+attack2" then return true end
 	end)
-	hook.Add("PlayerButtonDown", "sf_keyboard_unblockinput", function(ply, but)
+	hook.Add(PlayerButtonDown, "sf_keyboard_unblockinput", function(ply, but)
 		if but == KEY_LALT or but == KEY_RALT then
 			unlockControls(instance)
 		end
@@ -105,27 +110,42 @@ end
 
 --- Called when a button is pressed
 -- @client
--- @name inputPressed
+-- @name InputPressed
 -- @class hook
 -- @param number button Number of the button
-SF.hookAdd("PlayerButtonDown", "inputpressed", CheckButtonPerms)
+SF.hookAdd(PlayerButtonDown, "inputpressed", CheckButtonPerms)
 
 --- Called when a button is released
 -- @client
--- @name inputReleased
+-- @name InputReleased
 -- @class hook
 -- @param number button Number of the button
-SF.hookAdd("PlayerButtonUp", "inputreleased", CheckButtonPerms)
+SF.hookAdd(PlayerButtonUp, "inputreleased", CheckButtonPerms)
+
+--- Called when a keybind is pressed
+-- @client
+-- @name InputBindPressed
+-- @class hook
+-- @param string bind Name of keybind pressed
+-- @return boolean Returning true will block the binding from being pressed for the chip owner
+SF.hookAdd("PlayerBindPress", "inputbindpressed", function(instance, ply, bind)
+	if haspermission(instance, nil, "input") then
+		return true, {bind}
+	end
+	return false
+end,
+function(instance, args, ply)
+	if args[1] and args[2] and instance.player == LocalPlayer() then return true end
+end)
 
 --- Called when the mouse is moved
 -- @client
--- @name mousemoved
+-- @name MouseMoved
 -- @class hook
 -- @param number x X coordinate moved
 -- @param number y Y coordinate moved
-SF.hookAdd("StartCommand", "mousemoved", function(instance, ply, cmd)
+SF.hookAdd("InputMouseApply", "mousemoved", function(instance, _, x, y)
 	if haspermission(instance, nil, "input") then
-		local x, y = cmd:GetMouseX(), cmd:GetMouseY()
 		if x~=0 or y~=0 then
 			return true, { x, y }
 		end
@@ -136,7 +156,7 @@ end)
 
 --- Called when the mouse wheel is rotated
 -- @client
--- @name mouseWheeled
+-- @name MouseWheeled
 -- @class hook
 -- @param number delta Rotate delta
 SF.hookAdd("StartCommand", "mousewheeled", function(instance, ply, cmd)
@@ -164,6 +184,7 @@ end
 --- Input library.
 -- @name input
 -- @class library
+-- @client
 -- @libtbl input_library
 SF.RegisterLibrary("input")
 
@@ -173,23 +194,25 @@ local checkpermission = instance.player ~= SF.Superuser and SF.Permissions.check
 
 local getent
 local lockedControlCooldown = 0
-instance.data.input = {controlsLocked = false}
+
+local inputdata = {controlsLocked = false, cursorEnabled = false}
+instance.data.input = inputdata
 
 instance:AddHook("initialize", function()
 	getent = instance.Types.Entity.GetEntity
 end)
 
 instance:AddHook("deinitialize", function()
-	if instance.data.cursorEnabled then
+	if inputdata.cursorEnabled then
 		gui.EnableScreenClicker(false)
 	end
-	if instance.data.input.controlsLocked then
+	if inputdata.controlsLocked then
 		unlockControls(instance)
 	end
 end)
 
 instance:AddHook("starfall_hud_disconnected", function()
-	if instance.data.cursorEnabled then
+	if inputdata.cursorEnabled then
 		gui.EnableScreenClicker(false)
 	end
 end)
@@ -317,13 +340,9 @@ end
 -- @param boolean enabled Whether or not the cursor should be enabled
 function input_library.enableCursor(enabled)
 	checkluatype(enabled, TYPE_BOOL)
-	checkpermission(instance, nil, "input")
+	checkpermission(instance, nil, "input.enablecursor")
 
-	if not SF.IsHUDActive(instance.entity) then
-		SF.Throw("No HUD component connected", 2)
-	end
-
-	instance.data.cursorEnabled = enabled
+	inputdata.cursorEnabled = enabled
 	gui.EnableScreenClicker(enabled)
 end
 
@@ -342,11 +361,7 @@ end
 -- @param boolean enabled Whether to lock or unlock the controls
 function input_library.lockControls(enabled)
 	checkluatype(enabled, TYPE_BOOL)
-	checkpermission(instance, nil, "input")
-
-	if not SF.IsHUDActive(instance.entity) and (enabled or not instance.data.input.controlsLocked) then
-		SF.Throw("No HUD component connected", 2)
-	end
+	checkpermission(instance, nil, "input.lockcontrols")
 
 	if enabled then
 		if lockedControlCooldown + inputLockCooldown:GetFloat() > CurTime() then
@@ -370,8 +385,22 @@ end
 -- @client
 -- @return boolean Whether the player's control can be locked
 function input_library.canLockControls()
-	return SF.IsHUDActive(instance.entity) and lockedControlCooldown + inputLockCooldown:GetFloat() <= CurTime()
+	return haspermission(instance, nil, "input.lockcontrols") and lockedControlCooldown + inputLockCooldown:GetFloat() <= CurTime()
 end
 
+--- Returns whether the game menu overlay ( main menu ) is open or not.
+-- @client
+-- @return boolean Whether the game menu overlay ( main menu ) is open or not
+function input_library.isGameUIVisible()
+	return gui.IsGameUIVisible()
+end
+
+--- Returns the digital value of an analog stick on the current (set up via convars) controller.
+-- @name input_library.getAnalogValue
+-- @class function
+-- @client
+-- @param number axis The analog axis to poll. See https://wiki.facepunch.com/gmod/Enums/ANALOG
+-- @return number The digital value.
+input_library.getAnalogValue = input.GetAnalogValue
 
 end

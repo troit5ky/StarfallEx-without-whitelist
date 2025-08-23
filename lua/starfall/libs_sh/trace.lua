@@ -2,17 +2,11 @@
 local checkluatype = SF.CheckLuaType
 
 -- Register privileges
-SF.Permissions.registerPrivilege("trace", "Trace", "Allows the user to start traces")
 SF.Permissions.registerPrivilege("trace.decal", "Decal Trace", "Allows the user to apply decals with traces")
 
 local plyDecalBurst = SF.BurstObject("decals", "decals", 50, 50, "Rate decals can be created per second.", "Number of decals that can be created in a short time.")
 
-local function checkvector(pos)
-	if pos[1] ~= pos[1] or pos[1] == math.huge or pos[1] == -math.huge then SF.Throw("Inf or nan vector in trace position", 3) end
-	if pos[2] ~= pos[2] or pos[2] == math.huge or pos[2] == -math.huge then SF.Throw("Inf or nan vector in trace position", 3) end
-	if pos[3] ~= pos[3] or pos[3] == math.huge or pos[3] == -math.huge then SF.Throw("Inf or nan vector in trace position", 3) end
-end
-
+local math_huge = math.huge
 
 --- Provides functions for doing line/AABB traces
 -- @name trace
@@ -20,7 +14,13 @@ end
 -- @libtbl trace_library
 SF.RegisterLibrary("trace")
 
+local structWrapper, util_TraceLine, util_TraceHull, util_IntersectRayWithOBB, util_IntersectRayWithPlane, util_Decal, util_PointContents, util_AimVector = SF.StructWrapper, util.TraceLine, util.TraceHull, util.IntersectRayWithOBB, util.IntersectRayWithPlane, util.Decal, util.PointContents, util.AimVector
+
+local vec_SetUnpacked = getmetatable(Vector(0, 0, 0)).SetUnpacked
+local ang_SetUnpacked = getmetatable(Angle(0, 0, 0)).SetUnpacked
+
 return function(instance)
+
 local checkpermission = instance.player ~= SF.Superuser and SF.Permissions.check or function() end
 
 local trace_library = instance.Libraries.trace
@@ -33,14 +33,15 @@ local function convertFilter(filter)
 	if filter == nil then
 		return nil
 	elseif istable(filter) then
-		if ent_meta.sf2sensitive[filter]==nil then
+		local meta = debug.getmetatable(filter)
+		if meta==ent_meta or (meta and meta.supertype==ent_meta) then
+			return eunwrap(filter)
+		else
 			local l = {}
 			for i, v in ipairs(filter) do
 				l[i] = eunwrap(v)
 			end
 			return l
-		else
-			return eunwrap(filter)
 		end
 	elseif isfunction(filter) then
 		return function(ent)
@@ -52,6 +53,9 @@ local function convertFilter(filter)
 	end
 end
 
+local start_vec, endpos_vec, minbox_vec, maxbox_vec, origin_vec, angles_ang, normal_vec 
+	= Vector(0, 0, 0), Vector(0, 0, 0), Vector(0, 0, 0), Vector(0, 0, 0), Vector(0, 0, 0), Angle(0, 0, 0), Vector(0, 0, 0)
+
 --- Does a line trace
 -- @param Vector start Start position
 -- @param Vector endpos End position
@@ -59,29 +63,21 @@ end
 -- @param number? mask Trace mask
 -- @param number? colgroup The collision group of the trace
 -- @param boolean? ignworld Whether the trace should ignore world
+-- @param boolean? whitelist Make 'filter' param array act as a hit whitelist instead of blacklist
 -- @return table Result of the trace https://wiki.facepunch.com/gmod/Structures/TraceResult
-function trace_library.line(start, endpos, filter, mask, colgroup, ignworld)
-	checkpermission(instance, nil, "trace")
-	checkvector(start)
-	checkvector(endpos)
+function trace_library.line(start, endpos, filter, mask, colgroup, ignworld, whitelist)
+	vec_SetUnpacked(start_vec, start[1], start[2], start[3])
+	vec_SetUnpacked(endpos_vec, endpos[1], endpos[2], endpos[3])
 
-	local start, endpos = vunwrap(start), vunwrap(endpos)
-
-	filter = convertFilter(filter)
-	if mask ~= nil then checkluatype (mask, TYPE_NUMBER) end
-	if colgroup ~= nil then checkluatype (colgroup, TYPE_NUMBER) end
-	if ignworld ~= nil then checkluatype (ignworld, TYPE_BOOL) end
-
-	local trace = {
-		start = start,
-		endpos = endpos,
-		filter = filter,
+	return structWrapper(instance, util_TraceLine({
+		start = start_vec,
+		endpos = endpos_vec,
+		filter = convertFilter(filter),
 		mask = mask,
 		collisiongroup = colgroup,
 		ignoreworld = ignworld,
-	}
-
-	return SF.StructWrapper(instance, util.TraceLine(trace), "TraceResult")
+		whitelist = whitelist,
+	}), "TraceResult")
 end
 
 --- Does a swept-AABB trace
@@ -93,33 +89,25 @@ end
 -- @param number? mask Trace mask
 -- @param number? colgroup The collision group of the trace
 -- @param boolean? ignworld Whether the trace should ignore world
+-- @param boolean? whitelist Make 'filter' param array act as a hit whitelist instead of blacklist
 -- @return table Result of the trace https://wiki.facepunch.com/gmod/Structures/TraceResult
-function trace_library.hull(start, endpos, minbox, maxbox, filter, mask, colgroup, ignworld)
-	checkpermission(instance, nil, "trace")
-	checkvector(start)
-	checkvector(endpos)
-	checkvector(minbox)
-	checkvector(maxbox)
+function trace_library.hull(start, endpos, minbox, maxbox, filter, mask, colgroup, ignworld, whitelist)
+	vec_SetUnpacked(start_vec, start[1], start[2], start[3])
+	vec_SetUnpacked(endpos_vec, endpos[1], endpos[2], endpos[3])
+	vec_SetUnpacked(minbox_vec, minbox[1], minbox[2], minbox[3])
+	vec_SetUnpacked(maxbox_vec, maxbox[1], maxbox[2], maxbox[3])
 
-	local start, endpos, minbox, maxbox = vunwrap(start), vunwrap(endpos), vunwrap(minbox), vunwrap(maxbox)
-
-	filter = convertFilter(filter)
-	if mask ~= nil then checkluatype (mask, TYPE_NUMBER) end
-	if colgroup ~= nil then checkluatype (colgroup, TYPE_NUMBER) end
-	if ignworld ~= nil then checkluatype (ignworld, TYPE_BOOL) end
-
-	local trace = {
-		start = start,
-		endpos = endpos,
-		filter = filter,
+	return structWrapper(instance, util_TraceHull({
+		start = start_vec,
+		endpos = endpos_vec,
+		filter = convertFilter(filter),
 		mask = mask,
 		collisiongroup = colgroup,
 		ignoreworld = ignworld,
-		mins = minbox,
-		maxs = maxbox
-	}
-
-	return SF.StructWrapper(instance, util.TraceHull(trace), "TraceResult")
+		mins = minbox_vec,
+		maxs = maxbox_vec,
+		whitelist = whitelist,
+	}), "TraceResult")
 end
 
 --- Does a ray box intersection returning the position hit, normal, and trace fraction, or nil if not hit.
@@ -133,8 +121,28 @@ end
 -- @return Vector? Hit normal or nil if not hit
 -- @return number? Hit fraction or nil if not hit
 function trace_library.intersectRayWithOBB(rayStart, rayDelta, boxOrigin, boxAngles, boxMins, boxMaxs)
-	local pos, normal, fraction = util.IntersectRayWithOBB(vunwrap(rayStart), vunwrap(rayDelta), vunwrap(boxOrigin), aunwrap(boxAngles), vunwrap(boxMins), vunwrap(boxMaxs))
+	vec_SetUnpacked(start_vec, rayStart[1], rayStart[2], rayStart[3])
+	vec_SetUnpacked(endpos_vec, rayDelta[1], rayDelta[2], rayDelta[3])
+	vec_SetUnpacked(origin_vec, boxOrigin[1], boxOrigin[2], boxOrigin[3])
+	ang_SetUnpacked(angles_ang, boxAngles[1], boxAngles[2], boxAngles[3])
+	vec_SetUnpacked(minbox_vec, boxMins[1], boxMins[2], boxMins[3])
+	vec_SetUnpacked(maxbox_vec, boxMaxs[1], boxMaxs[2], boxMaxs[3])
+
+	local pos, normal, fraction = util_IntersectRayWithOBB(start_vec, endpos_vec, origin_vec, angles_ang, minbox_vec, maxbox_vec)
 	if pos then return vwrap(pos), vwrap(normal), fraction end
+end
+
+--- Performs a box-sphere intersection and returns whether there was an intersection or not.
+-- @param Vector boxMins The minimum extents of the World Axis-Aligned box.
+-- @param Vector boxMaxs The maximum extents of the World Axis-Aligned box.
+-- @param Vector spherePos Position of the sphere.
+-- @param number sphereRadius The radius of the sphere.
+-- @return boolean true if there is an intersection, false otherwise.
+function trace_library.isBoxIntersectingSphere(boxMins, boxMaxs, spherePos, sphereRadius)
+	vec_SetUnpacked(minbox_vec, boxMins[1], boxMins[2], boxMins[3])
+	vec_SetUnpacked(maxbox_vec, boxMaxs[1], boxMaxs[2], boxMaxs[3])
+	vec_SetUnpacked(origin_vec, spherePos[1], spherePos[2], spherePos[3])
+	return util.IsBoxIntersectingSphere(minbox_vec, maxbox_vec, origin_vec, sphereRadius)
 end
 
 --- Does a ray plane intersection returning the position hit or nil if not hit
@@ -144,7 +152,12 @@ end
 -- @param Vector planeNormal The normal of the plane
 -- @return Vector? Hit position or nil if not hit
 function trace_library.intersectRayWithPlane(rayStart, rayDelta, planeOrigin, planeNormal)
-	local pos = util.IntersectRayWithPlane(vunwrap(rayStart), vunwrap(rayDelta), vunwrap(planeOrigin), vunwrap(planeNormal))
+	vec_SetUnpacked(start_vec, rayStart[1], rayStart[2], rayStart[3])
+	vec_SetUnpacked(endpos_vec, rayDelta[1], rayDelta[2], rayDelta[3])
+	vec_SetUnpacked(origin_vec, planeOrigin[1], planeOrigin[2], planeOrigin[3])
+	vec_SetUnpacked(normal_vec, planeNormal[1], planeNormal[2], planeNormal[3])
+
+	local pos = util_IntersectRayWithPlane(start_vec, endpos_vec, origin_vec, normal_vec)
 	if pos then return vwrap(pos) end
 end
 
@@ -156,22 +169,34 @@ end
 function trace_library.decal(name, start, endpos, filter)
 	checkpermission(instance, nil, "trace.decal")
 	checkluatype(name, TYPE_STRING)
-	checkvector(start)
-	checkvector(endpos)
-
-	local start, endpos = vunwrap(start), vunwrap(endpos)
 
 	if filter ~= nil then checkluatype(filter, TYPE_TABLE) filter = convertFilter(filter) end
 
+	vec_SetUnpacked(start_vec, start[1], start[2], start[3])
+	vec_SetUnpacked(endpos_vec, endpos[1], endpos[2], endpos[3])
+
 	plyDecalBurst:use(instance.player, 1)
-	util.Decal( name, start, endpos, filter )
+	util_Decal(name, start_vec, endpos_vec, filter)
+end
+
+--- Returns True if player is allowed to use trace.decal
+-- @return boolean Whether the decal trace can be used
+function trace_library.canCreateDecal()
+	return plyDecalBurst:check(instance.player) > 0
+end
+
+--- Returns the number of decals player is allowed to use
+-- @return number The number of decals left
+function trace_library.decalsLeft()
+	return plyDecalBurst:check(instance.player)
 end
 
 --- Returns the contents of the position specified.
 -- @param Vector position The position to get the CONTENTS of
 -- @return number Contents bitflag, see the CONTENTS enums
 function trace_library.pointContents(position)
-	return util.PointContents(vunwrap(position))
+	vec_SetUnpacked(endpos_vec, position[1], position[2], position[3])
+	return util_PointContents(endpos_vec)
 end
 
 --- Calculates the aim vector from a 2D screen position. This is essentially a generic version of input.screenToVector, where you can define the view angles and screen size manually.
@@ -188,7 +213,8 @@ function trace_library.aimVector(viewAngles, viewFOV, x, y, screenWidth, screenH
 	checkluatype(y, TYPE_NUMBER)
 	checkluatype(screenWidth, TYPE_NUMBER)
 	checkluatype(screenHeight, TYPE_NUMBER)
-	return vwrap(util.AimVector(aunwrap(viewAngles), viewFOV, x, y, screenWidth, screenHeight))
+	ang_SetUnpacked(angles_ang, viewAngles[1], viewAngles[2], viewAngles[3])
+	return vwrap(util_AimVector(angles_ang, viewFOV, x, y, screenWidth, screenHeight))
 end
 
 end

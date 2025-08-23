@@ -1,6 +1,8 @@
 -- Global to all starfalls
 local checkluatype = SF.CheckLuaType
 local dgetmeta = debug.getmetatable
+local COL_META = FindMetaTable("Color")
+local Col_SetUnpacked,Col_Unpack = COL_META.SetUnpacked,COL_META.Unpack
 
 local math_Clamp = math.Clamp
 local clamp = function(v) return math_Clamp(v, 0, 255) end
@@ -42,13 +44,15 @@ local hex_to_rgb = {
 -- @field a The 0-255 alpha value of the color. Can also be indexed with [4]
 -- @libtbl color_methods
 -- @libtbl color_meta
-SF.RegisterType("Color", nil, nil, debug.getregistry().Color, nil, function(checktype, color_meta)
+SF.RegisterType("Color", nil, nil, FindMetaTable("Color"), nil, function(checktype, color_meta)
 	return function(clr)
-		return setmetatable({ clr.r, clr.g, clr.b, clr.a }, color_meta)
+		-- Colors don't sanitize their member types so tonumber needed
+		local r,g,b,a = Col_Unpack(clr)
+		return setmetatable({tonumber(r) or 255, tonumber(g) or 255, tonumber(b) or 255, tonumber(a) or 255}, color_meta)
 	end,
 	function(obj)
 		checktype(obj, color_meta, 2)
-		return Color((tonumber(obj[1]) or 255), (tonumber(obj[2]) or 255), (tonumber(obj[3]) or 255), (tonumber(obj[4]) or 255))
+		return Color(obj[1], obj[2], obj[3], obj[4])
 	end
 end)
 
@@ -61,13 +65,20 @@ local function wrap(tbl)
 	return setmetatable(tbl, color_meta)
 end
 
+local function QuickUnwrapper()
+	local Col = Color(255,255,255)
+	return function(v) Col_SetUnpacked(Col, v[1], v[2], v[3], v[4]) return Col end
+end
+color_meta.QuickUnwrap1 = QuickUnwrapper()
+
 --- Creates a table struct that resembles a Color
+-- E.g. Color(255,0,0) Color("#FF0000") Color()
 -- @name builtins_library.Color
 -- @class function
--- @param number r Red or string hexadecimal color
--- @param number g Green
--- @param number b Blue
--- @param number a Alpha
+-- @param number|string|nil r Red component or string hexadecimal color. Defaults to 255.
+-- @param number? g Green component. Defaults to 255.
+-- @param number? b Blue component. Defaults to 255.
+-- @param number? a Alpha component. Defaults to 255.
 -- @return Color New color
 function instance.env.Color(r, g, b, a)
 	if isstring(r) then
@@ -171,7 +182,7 @@ function color_meta.__mul(a, b)
 end
 
 --- Division metamethod
--- @param number|Color b Number or Color dividend
+-- @param number|Color a Number or Color dividend
 -- @param number|Color b Number or Color divisor
 -- @return Color Scaled color.
 function color_meta.__div(a, b)

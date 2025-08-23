@@ -487,6 +487,22 @@ env.MOVETYPE = {
 	CUSTOM = MOVETYPE_CUSTOM,
 }
 
+--- ENUMs used by Entity.setCustomPropForces (Entity.PhysicsSimulate internally)
+-- @name builtins_library.SIM
+-- @class table
+-- @field NOTHING
+-- @field LOCAL_ACCELERATION
+-- @field LOCAL_FORCE
+-- @field GLOBAL_ACCELERATION
+-- @field GLOBAL_FORCE
+env.SIM = {
+	NOTHING = SIM_NOTHING,
+	LOCAL_ACCELERATION = SIM_LOCAL_ACCELERATION,
+	LOCAL_FORCE = SIM_LOCAL_FORCE,
+	GLOBAL_ACCELERATION = SIM_GLOBAL_ACCELERATION,
+	GLOBAL_FORCE = SIM_GLOBAL_FORCE,
+}
+
 --- ENUMs of in_keys for use with player:keyDown
 -- @name builtins_library.IN_KEY
 -- @class table
@@ -1009,10 +1025,35 @@ env.RENDERFX = {
 	PULSEFASTWIDER = kRenderFxPulseFastWider
 }
 
+--- ENUMs of entity rendergroups
+-- @name builtins_library.RENDERGROUP
+-- @class table
+-- @field STATIC_HUGE
+-- @field OPAQUE_HUGE
+-- @field STATIC
+-- @field OPAQUE
+-- @field TRANSLUCENT
+-- @field BOTH
+-- @field VIEWMODEL
+-- @field VIEWMODEL_TRANSLUCENT
+-- @field OPAQUE_BRUSH
+-- @field OTHER
+env.RENDERGROUP = {
+	STATIC_HUGE = RENDERGROUP_STATIC_HUGE,
+	OPAQUE_HUGE = RENDERGROUP_OPAQUE_HUGE,
+	STATIC = RENDERGROUP_STATIC,
+	OPAQUE = RENDERGROUP_OPAQUE,
+	TRANSLUCENT = RENDERGROUP_TRANSLUCENT,
+	BOTH = RENDERGROUP_BOTH,
+	VIEWMODEL = RENDERGROUP_VIEWMODEL,
+	VIEWMODEL_TRANSLUCENT = RENDERGROUP_VIEWMODEL_TRANSLUCENT,
+	OPAQUE_BRUSH = RENDERGROUP_OPAQUE_BRUSH,
+	OTHER = RENDERGROUP_OTHER
+}
+
 --- VRmod library enums
 -- @name vr_library.VR
 -- @class table
--- @client
 -- @field BOOLEAN_PRIMARYFIRE
 -- @field VECTOR1_PRIMARYFIRE
 -- @field BOOLEAN_SECONDARYFIRE
@@ -1296,13 +1337,13 @@ env.NAV_TRAVERSE_TYPE = {
 	GO_ELEVATOR_DOWN = 8
 }
 
--- ENUMs used for anything that returns a damage type.
+--- ENUMs used for anything that returns a damage type.
 -- @name builtins_library.DAMAGE
 -- @class table
 -- @field GENERIC
 -- @field CRUSH
 -- @field BULLET
--- @field SPLASH
+-- @field SLASH
 -- @field BURN
 -- @field VEHICLE
 -- @field FALL
@@ -1366,6 +1407,20 @@ env.DAMAGE = {
 	["BUCKSHOT"] = 536870912,
 	["SNIPER"] = 1073741824,
 	["MISSILEDEFENSE"] = 2147483648
+}
+
+--- ENUMs used by Bass:getState()
+-- @name builtins_library.GMOD_CHANNEL
+-- @class table
+-- @field STOPPED 0
+-- @field PLAYING 1
+-- @field PAUSED 2
+-- @field STALLED 3
+env.GMOD_CHANNEL = {
+	STOPPED = 0,
+	PLAYING = 1,
+	PAUSED = 2,
+	STALLED = 3
 }
 
 end

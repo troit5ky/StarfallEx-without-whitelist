@@ -14,24 +14,49 @@ return function(instance)
 local checkpermission = instance.player ~= SF.Superuser and SF.Permissions.check or function() end
 
 local find_library = instance.Libraries.find
+local owrap, ounwrap = instance.WrapObject, instance.UnwrapObject
 local vec_meta, vwrap, vunwrap = instance.Types.Vector, instance.Types.Vector.Wrap, instance.Types.Vector.Unwrap
 local plywrap = instance.Types.Player.Wrap
 
-local function convert(results, func)
-	if func~=nil then checkluatype (func, TYPE_FUNCTION) end
-	local wrap = instance.WrapObject
+local vunwrap1, vunwrap2, vunwrap3, vunwrap4
+instance:AddHook("initialize", function()
+	vunwrap1, vunwrap2, vunwrap3, vunwrap4 = vec_meta.QuickUnwrap1, vec_meta.QuickUnwrap2, vec_meta.QuickUnwrap3, vec_meta.QuickUnwrap4
+end)
 
+local function convert(results, func)
 	local t = {}
-	if func then
+	if func~=nil then
+		checkluatype(func, TYPE_FUNCTION, 1)
 		for i = 1, #results do
-			local e = wrap(results[i])
+			local e = owrap(results[i])
 			if e and func(e) then
 				t[#t + 1] = e
 			end
 		end
 	else
 		for i = 1, #results do
-			local e = wrap(results[i])
+			local e = owrap(results[i])
+			if e then
+				t[#t + 1] = e
+			end
+		end
+	end
+	return t
+end
+
+local function convertIter(iter, func)
+	local t = {}
+	if func~=nil then
+		checkluatype(func, TYPE_FUNCTION, 1)
+		for _, v in iter() do
+			local e = owrap(v)
+			if e and func(e) then
+				t[#t + 1] = e
+			end
+		end
+	else
+		for _, v in iter() do
+			local e = owrap(v)
 			if e then
 				t[#t + 1] = e
 			end
@@ -48,9 +73,7 @@ end
 function find_library.inBox(min, max, filter)
 	checkpermission(instance, nil, "find")
 
-	local min, max = vunwrap(min), vunwrap(max)
-
-	return convert(ents.FindInBox(min, max), filter)
+	return convert(ents.FindInBox(vunwrap1(min), vunwrap2(max)), filter)
 end
 
 --- Finds entities in a sphere
@@ -62,9 +85,7 @@ function find_library.inSphere(center, radius, filter)
 	checkpermission(instance, nil, "find")
 	checkluatype (radius, TYPE_NUMBER)
 
-	local center = vunwrap(center)
-
-	return convert(ents.FindInSphere(center, radius), filter)
+	return convert(ents.FindInSphere(vunwrap1(center), radius), filter)
 end
 
 --- Finds entities in a cone
@@ -79,9 +100,7 @@ function find_library.inCone(pos, dir, distance, radius, filter)
 	checkluatype (distance, TYPE_NUMBER)
 	checkluatype (radius, TYPE_NUMBER)
 
-	local pos, dir = vunwrap(pos), vunwrap(dir)
-
-	return convert(ents.FindInCone(pos, dir, distance, radius), filter)
+	return convert(ents.FindInCone(vunwrap1(pos), vunwrap2(dir), distance, radius), filter)
 end
 
 --- Finds entities in a ray
@@ -94,12 +113,12 @@ end
 function find_library.inRay(startpos, endpos, mins, maxs, filter)
 	checkpermission(instance, nil, "find")
 
-	startpos = vunwrap(startpos)
-	endpos = vunwrap(endpos)
+	startpos = vunwrap1(startpos)
+	endpos = vunwrap2(endpos)
 
 	if mins ~= nil or maxs ~= nil then
-		mins = vunwrap(mins)
-		maxs = vunwrap(maxs)
+		mins = vunwrap3(mins)
+		maxs = vunwrap4(maxs)
 	end
 
 	return convert(ents.FindAlongRay(startpos, endpos, mins, maxs), filter)
@@ -146,8 +165,7 @@ if SERVER then
 	-- @return table An array of found entities
 	function find_library.inPVS(pos, filter)
 		checkpermission(instance, nil, "find")
-
-		return convert(ents.FindInPVS(vunwrap(pos)), filter)
+		return convert(ents.FindInPVS(vunwrap1(pos)), filter)
 	end
 end
 
@@ -157,7 +175,7 @@ end
 function find_library.allPlayers(filter)
 	checkpermission(instance, nil, "find")
 
-	return convert(player.GetAll(), filter)
+	return convertIter(player.Iterator, filter)
 end
 
 --- Finds all entities
@@ -166,7 +184,7 @@ end
 function find_library.all(filter)
 	checkpermission(instance, nil, "find")
 
-	return convert(ents.GetAll(), filter)
+	return convertIter(ents.Iterator, filter)
 end
 
 --- Finds the closest entity to a point
@@ -191,7 +209,7 @@ end
 --- Returns a sorted array of entities by how close they are to a point
 -- @param table ents The array of entities
 -- @param Vector pos The position
--- @param boolean furthest Whether to have the further entities first
+-- @param boolean? furthest Whether to have the further entities first
 -- @return table A table of the closest entities
 function find_library.sortByClosest(ents, pos, furthest)
 	local distances = {}
@@ -247,6 +265,30 @@ function find_library.playersByName(name, casesensitive, exact)
 	end
 
 	return ret
+end
+
+--- Finds the player with the given a steamid. Returns nil if not found
+-- @param string steamid Steam Id to search for
+-- @return Player? The player with matching steamid
+function find_library.playerBySteamID(steamid)
+	local found = player.GetBySteamID(steamid)
+	if found then return plywrap(found) end
+end
+
+--- Finds the player with the given a 64-bit steamid. Returns nil if not found
+-- @param string steamid 64-bit steam id to search for
+-- @return Player? The player with matching steamid
+function find_library.playerBySteamID64(steamid)
+	local found = player.GetBySteamID64(steamid)
+	if found then return plywrap(found) end
+end
+
+--- Returns entity that has given Entity:mapCreationID.
+-- @param number num Entity's creation id
+-- @return Entity? The found entity or nil if not found
+function find_library.getMapCreatedEntity(num)
+	checkluatype(num, TYPE_NUMBER)
+	return owrap(ents.GetMapCreatedEntity(num))
 end
 
 end

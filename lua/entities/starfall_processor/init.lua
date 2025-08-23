@@ -2,6 +2,9 @@ AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
+local IsValid = FindMetaTable("Entity").IsValid
+local IsWorld = FindMetaTable("Entity").IsWorld
+
 function ENT:Initialize()
 	self:PhysicsInit(SOLID_VPHYSICS)
 	self:SetMoveType(MOVETYPE_VPHYSICS)
@@ -11,7 +14,7 @@ function ENT:Initialize()
 	self:AddEFlags( EFL_FORCE_CHECK_TRANSMIT )
 
 	self:SetNWInt("State", self.States.None)
-	self:SetColor(Color(255, 0, 0, self:GetColor().a))
+	self:SetColor4Part(255, 0, 0, select(4, self:GetColor4Part()))
 	self.ErroredPlayers = {}
 	self.ActiveHuds = {}
 end
@@ -22,7 +25,7 @@ end
 
 function ENT:SetCustomModel(model)
 	if self:GetModel() == model then return end
-	if self:GetParent():IsValid() then
+	if IsValid(self:GetParent()) then
 		self:SetModel(model)
 	else
 		local constraints = constraint.GetTable(self)
@@ -57,6 +60,11 @@ function ENT:Use(activator)
 			net.WriteEntity(activator)
 		net.Broadcast()
 	end
+
+	local instance = self.instance
+	if instance then
+		instance:runScriptHook("starfallused", instance.WrapObject(activator), instance.WrapObject(self))
+	end
 end
 
 function ENT:OnRemove()
@@ -73,69 +81,20 @@ function ENT:Think()
 	end
 end
 
-function ENT:GetSendData(toowner)
-	if not self.instance then return end
-
-	local senddata = {
-		owner = self.sfdata.owner,
-		files = {},
-		mainfile = self.sfdata.mainfile,
-		proc = self
-	}
-
-	for k, v in pairs(self.sfdata.files) do senddata.files[k] = v end
-
-	local ppdata = self.instance and self.instance.ppdata
-	if ppdata then
-		if ppdata.serverorclient or (not toowner and ppdata.owneronly) then
-			for filename, code in pairs(senddata.files) do
-				local isserver, isowneronly = ppdata.serverorclient and ppdata.serverorclient[filename] == "server", ppdata.owneronly and ppdata.owneronly[filename]
-				if isserver or (not toowner and isowneronly) then
-					local infodata = {}
-					if ppdata.scriptnames and ppdata.scriptnames[filename] then
-						infodata[#infodata + 1] = "--@name " .. ppdata.scriptnames[filename]
-					end
-					if ppdata.scriptauthors and ppdata.scriptauthors[filename] then
-						infodata[#infodata + 1] = "--@author " .. ppdata.scriptauthors[filename]
-					end
-					infodata[#infodata + 1] = isserver and "--@server" or "--@owneronly"
-					senddata.files[filename] = table.concat(infodata, "\n")
-				end
-			end
-		end
-		local clientmain = ppdata.clientmain and ppdata.clientmain[self.sfdata.mainfile]
-		if clientmain then
-			if senddata.files[clientmain] then
-				senddata.mainfile = clientmain
-			else
-				clientmain = SF.NormalizePath(string.GetPathFromFilename(self.sfdata.mainfile) .. clientmain)
-				if senddata.files[clientmain] then
-					senddata.mainfile = clientmain
-				end
-			end
+function ENT:SendCode(recipient)
+	if not (IsValid(self.owner) or IsWorld(self.owner)) then return end
+	if not self.sfsenddata then return end
+	local others = {}
+	for _, ply in ipairs(recipient and (istable(recipient) and recipient or { recipient }) or player.GetHumans()) do
+		if ply:GetInfoNum("sf_enabled_cl", 0)==0 then continue end
+		if ply==self.owner and self.sfownerdata then
+			SF.SendStarfall("starfall_processor_download", self.sfownerdata, self.owner)
+		else
+			others[#others+1] = ply
 		end
 	end
-	senddata.compressed = SF.CompressFiles(senddata.files)
-
-	return senddata
-end
-
-function ENT:SendCode(recipient)
-	if not self.sfsenddata then return end
-	if self.sfownerdata then -- Send specific data for owner if there are owner-only files
-		local others = {}
-		for _, ply in ipairs(recipient and (istable(recipient) and recipient or { recipient }) or player.GetHumans()) do
-			if ply==self.owner then
-				SF.SendStarfall("starfall_processor_download", self.sfownerdata, self.owner)
-			else
-				others[#others+1] = ply
-			end
-		end
-		if #others > 0 then
-			SF.SendStarfall("starfall_processor_download", self.sfsenddata, others)
-		end
-	else
-		SF.SendStarfall("starfall_processor_download", self.sfsenddata, recipient)
+	if #others > 0 then
+		SF.SendStarfall("starfall_processor_download", self.sfsenddata, others)
 	end
 end
 
@@ -163,7 +122,7 @@ local function EntityLookup(CreatedEntities)
 		if id == nil then return default end
 		if id == 0 then return game.GetWorld() end
 		local ent = CreatedEntities[id]
-		if (ent and ent:IsValid()) then return ent else return default end
+		if IsValid(ent) then return ent else return default end
 	end
 end
 function ENT:PostEntityPaste(ply, ent, CreatedEntities)
@@ -175,22 +134,24 @@ function ENT:PostEntityPaste(ply, ent, CreatedEntities)
 			WireLib.ApplyDupeInfo(ply, ent, info, EntityLookup(CreatedEntities))
 		end
 
-		if info.starfall then
+		if istable(info.starfall) then
 			local ver = tonumber(info.starfall.ver)
-			if ver then
-				if ver > 4.3 then
-					error("This server's starfall is too out of date to paste")
-				else
-					-- 4.3 case
-					local files = SF.DecompressFiles(info.starfall.files)
-					self.starfalluserdata = info.starfall.udata
-					self.sfdata = {owner = ply, files = files, mainfile = info.starfall.mainfile, proc = self}
-				end
-			else
+			if ver == 4.3 then
+				if not isstring(info.starfall.files) then error("Corrupt starfall dupe data") end
+				local files = SF.DecompressFiles(info.starfall.files)
+				self.starfalluserdata = info.starfall.udata and tostring(info.starfall.udata) or nil
+				self.sfdata = {owner = ply, files = files, mainfile = tostring(info.starfall.mainfile), proc = self}
+			elseif ver==nil then
 				-- Legacy duplications
-				local files, mainfile = SF.LegacyDeserializeCode(info.starfall)
-				self.starfalluserdata = info.starfalluserdata
-				self.sfdata = {owner = ply, files = files, mainfile = mainfile, proc = self}
+				if not istable(info.starfall.source) then error("Corrupt starfall dupe data") end
+				local files = {}
+				for filename, source in pairs(info.starfall.source) do
+					files[tostring(filename)] = string.gsub(source, "[" .. string.char(5) .. string.char(4) .. "]", { [string.char(5)[1]] = "\n", [string.char(4)[1]] = '"' })
+				end
+				self.starfalluserdata = info.starfalluserdata and tostring(info.starfalluserdata) or nil
+				self.sfdata = {owner = ply, files = files, mainfile = tostring(info.starfall.mainfile), proc = self}
+			else
+				error("This server's starfall is too out of date to paste")
 			end
 		end
 	end
@@ -200,12 +161,12 @@ local function dupefinished(TimedPasteData, TimedPasteDataCurrent)
 	local entList = TimedPasteData[TimedPasteDataCurrent].CreatedEntities
 	local starfalls = {}
 	for k, v in pairs(entList) do
-		if IsValid(v) and v:GetClass() == "starfall_processor" and v.sfdata then
+		if isentity(v) and IsValid(v) and v:GetClass() == "starfall_processor" and v.sfdata then
 			starfalls[#starfalls+1] = v
 		end
 	end
 	for k, v in pairs(starfalls) do
-		v:SetupFiles(v.sfdata)
+		v:Compile(v.sfdata)
 		local instance = v.instance
 		if instance then
 			instance:runScriptHook("dupefinished", instance.Sanitize(entList))
@@ -219,27 +180,25 @@ util.AddNetworkString("starfall_processor_used")
 util.AddNetworkString("starfall_processor_link")
 util.AddNetworkString("starfall_processor_kill")
 util.AddNetworkString("starfall_processor_clinit")
-util.AddNetworkString("starfall_report_error")
 
 -- Request code from the chip. If the chip doesn't have code yet add player to list to send when there is code.
 net.Receive("starfall_processor_download", function(len, ply)
 	local proc = net.ReadEntity()
-	if ply:IsValid() and proc:IsValid() then
+	if IsValid(ply) and IsValid(proc) then
 		proc:SendCode(ply)
 	end
 end)
 
 net.Receive("starfall_processor_link", function(len, ply)
-	local entIndex = net.ReadUInt(16)
-	local linked = Entity(entIndex)
-	if linked.link and linked.link:IsValid() then
+	local linked = Entity(net.ReadUInt(16))
+	if IsValid(linked.link) then
 		SF.LinkEnt(linked, linked.link, ply)
 	end
 end)
 
 net.Receive("starfall_processor_kill", function(len, ply)
 	local target = net.ReadEntity()
-	if ply:IsAdmin() and target:IsValid() and target:GetClass()=="starfall_processor" then
+	if ply:IsAdmin() and IsValid(target) and target:GetClass()=="starfall_processor" then
 		target:Error({message = "Killed by admin", traceback = ""})
 		net.Start("starfall_processor_kill")
 		net.WriteEntity(target)
@@ -249,20 +208,11 @@ end)
 
 net.Receive("starfall_processor_clinit", function(len, ply)
 	local proc = net.ReadEntity()
-	if ply:IsValid() and proc:IsValid() then
+	if IsValid(ply) and IsValid(proc) then
 		local instance = proc.instance
 		if instance then
 			instance:runScriptHook("clientinitialized", instance.Types.Player.Wrap(ply))
 		end
-	end
-end)
-
-net.Receive("starfall_report_error", function(len, ply)
-	local chip = net.ReadEntity()
-	if chip:IsValid() and IsValid(chip.owner) and chip.ErroredPlayers and not chip.ErroredPlayers[ply] and chip.owner ~= ply then
-		chip.ErroredPlayers[ply] = true
-		SF.AddNotify(chip.owner, "Starfall: ("..chip.sfdata.mainfile..") errored for player: ("..ply:Nick()..")", "ERROR", 7, "SILENT")
-		SF.Print(chip.owner, string.sub(net.ReadString(), 1, 2048))
 	end
 end)
 

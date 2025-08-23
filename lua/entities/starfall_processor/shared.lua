@@ -16,35 +16,44 @@ ENT.States          = {
 	None = 3,
 }
 
+local IsValid = FindMetaTable("Entity").IsValid
 
-function ENT:Compile()
-	if self.instance then
-		self:Destroy()
+function ENT:Compile(sfdata)
+	self:Destroy()
+	local newdata = sfdata~=nil
+	if newdata then
+		self.sfdata = sfdata
+		self.owner = sfdata.owner
+		sfdata.proc = self
+	else
+		sfdata = self.sfdata
 	end
 
+	if not (sfdata and sfdata.files and sfdata.files[sfdata.mainfile]) then return end
 	self.error = nil
 
-	if not (self.sfdata and self.sfdata.files and self.sfdata.files[self.sfdata.mainfile]) then return end
-	local ok, instance = SF.Instance.Compile(self.sfdata.files, self.sfdata.mainfile, self.owner, self)
+	local ok, instance = SF.Instance.Compile(sfdata.files, sfdata.mainfile, self.owner, self)
 	if not ok then self:Error(instance) return end
 
-	if instance.ppdata.scriptnames and instance.mainfile and instance.ppdata.scriptnames[instance.mainfile] then
-		self.name = string.sub(tostring(instance.ppdata.scriptnames[instance.mainfile]), 1, 64)
-	else
-		self.name = "Generic ( No-Name )"
-	end
+	if newdata then
+		local mainpp = instance.ppdata.files[instance.mainfile]
+		self.name = mainpp.scriptname or "Generic ( No-Name )"
+		self.author = mainpp.scriptauthor or "No-Author"
+		if SERVER then
+			if mainpp.model then
+				pcall(function() self:SetCustomModel(SF.CheckModel(mainpp.model, self.owner, true)) end)
+			end
 
-	if instance.ppdata.scriptauthors and instance.mainfile and instance.ppdata.scriptauthors[instance.mainfile] then
-		self.author = string.sub(tostring(instance.ppdata.scriptauthors[instance.mainfile]), 1, 64)
-	else
-		self.author = nil
+			self.sfsenddata, self.sfownerdata = instance.ppdata:GetSendData(sfdata)
+			self:SendCode()
+		end
 	end
-
 
 	self.instance = instance
+
 	instance.runOnError = function(err)
 		-- Have to make sure it's valid because the chip can be deleted before deinitialization and trigger errors
-		if self:IsValid() then
+		if IsValid(self) then
 			self:Error(err)
 		end
 	end
@@ -54,8 +63,7 @@ function ENT:Compile()
 
 	if SERVER then
 		self.ErroredPlayers = {}
-		local clr = self:GetColor()
-		self:SetColor(Color(255, 255, 255, clr.a))
+		self:SetColor4Part(255, 255, 255, select(4, self:GetColor4Part()))
 		self:SetNWInt("State", self.States.Normal)
 
 		if self.Inputs then
@@ -78,35 +86,11 @@ function ENT:Compile()
 end
 
 function ENT:Destroy()
-	if self.instance then
-		self.instance:runScriptHook("removed")
-		--removed hook can cause instance to become nil
-		if self.instance then
-			self.instance:deinitialize()
-			self.instance = nil
-		end
-	end
-end
-
-function ENT:SetupFiles(sfdata)
-	self.sfdata = sfdata
-	self.owner = sfdata.owner
-	sfdata.proc = self
-
-	self:Compile()
-
-	if SERVER and self.instance then
-		self.sfsenddata = self:GetSendData()
-		self.sfownerdata = self.instance and self.instance.ppdata and self.instance.ppdata.owneronly and self:GetSendData(true) or nil
-
-		if self.instance and self.instance.ppdata.models and self.instance.mainfile then
-			local model = self.instance.ppdata.models[self.instance.mainfile]
-			if model then
-				pcall(function() self:SetCustomModel(SF.CheckModel(model, self.owner, true)) end)
-			end
-		end
-
-		self:SendCode()
+	local instance = self.instance
+	if instance then
+		instance:runScriptHook("removed")
+		instance:deinitialize()
+		self.instance = nil
 	end
 end
 
@@ -123,47 +107,21 @@ end
 
 function ENT:Error(err)
 	self.error = err
-
-	local msg = err.message
-	local traceback = err.traceback
-
-	if SERVER then
-		self:SetNWInt("State", self.States.Error)
-		self:SetColor(Color(255, 0, 0, 255))
-		self:SetDTString(0, traceback or msg)
-	end
-
-	local newline = string.find(msg, "\n")
-	if newline then
-		msg = string.sub(msg, 1, newline - 1)
-	end
-	if self.owner:IsValid() then
-		SF.AddNotify(self.owner, msg, "ERROR", 7, "ERROR1")
-	end
-
 	if self.instance then
 		self.instance:deinitialize()
 		self.instance = nil
 	end
 
-	if SERVER then
-		if self.owner:IsValid() then
-			SF.Print(self.owner, traceback)
-		end
-	else
-		print(traceback)
+	local msg = string.match(err.message, "[^\n]+") or ""
+	local traceback = err.traceback
 
-		if self.owner ~= LocalPlayer() and self.owner:IsValid() and GetConVarNumber("sf_timebuffer_cl")>0 then
-			net.Start("starfall_report_error")
-			net.WriteEntity(self)
-			net.WriteString(msg.."\n"..traceback)
-			net.SendToServer()
-		end
+	if SERVER then
+		self:SetNWInt("State", self.States.Error)
+		self:SetColor4Part(255, 0, 0, 255)
 	end
-	
-	for inst, _ in pairs(SF.allInstances) do
-		inst:runScriptHook("starfallerror", inst.Types.Entity.Wrap(self), inst.Types.Player.Wrap(SERVER and self.owner or LocalPlayer()), msg)
-	end
+
+	hook.Run("StarfallError", self, self.owner, CLIENT and LocalPlayer() or Entity(0), self.sfdata and self.sfdata.mainfile or "", msg, traceback)
+	SF.SendError(self, msg, traceback)
 end
 
 local function MenuOpen( ContextMenu, Option, Entity, Trace )
@@ -208,7 +166,7 @@ properties.Add( "starfall", {
 	Order = 999,
 	MenuIcon = "icon16/wrench.png", -- We should create an icon
 	Filter = function( self, ent, ply )
-		if not (ent and ent:IsValid()) then return false end
+		if not IsValid(ent) then return false end
 		if not gamemode.Call( "CanProperty", ply, "starfall", ent ) then return false end
 		return ent.Starfall or ent.link and ent.link.Starfall
 	end,
@@ -242,7 +200,7 @@ net.Receive("starfall_hud_set_enabled" , function()
 	local chip = net.ReadEntity()
 	local activator = net.ReadEntity()
 	local enabled = net.ReadBool()
-	if ply:IsValid() and ply:IsPlayer() and chip:IsValid() and chip.ActiveHuds then
+	if IsValid(ply) and ply:IsPlayer() and IsValid(chip) and chip.ActiveHuds then
 		SF.EnableHud(ply, chip, activator, enabled, true)
 	end
 end)
@@ -251,22 +209,40 @@ local function runHudHooks(ply, chip, activator, enabled)
 	local instance = chip.instance
 	if instance then
 		instance:runScriptHook(enabled and "hudconnected" or "huddisconnected", instance.WrapObject(activator), instance.WrapObject(ply))
-		instance:RunHook(enabled and "starfall_hud_connected" or "starfall_hud_disconnected", activator)
+		instance:RunHook(enabled and "starfall_hud_connected" or "starfall_hud_disconnected", activator, ply)
+	end
+end
+
+local function isVehicleOrHudControlsLocked(activator)
+	if activator.locksControls then
+		return activator
+	end
+	activator = SF.HudVehicleLinks[activator]
+	if activator then
+		for v in pairs(activator) do
+			if v.locksControls then
+				return v
+			end
+		end
 	end
 end
 
 if SERVER then
 	function SF.EnableHud(ply, chip, activator, enabled, dontsync)
 		local huds = chip.ActiveHuds
-		if activator and activator:IsValid() then
+		if IsValid(activator) then
 			local n = "SF_HUD"..ply:EntIndex()..":"..activator:EntIndex()
+			local lockController = isVehicleOrHudControlsLocked(activator)
 			local function disconnect(sync)
 				huds[ply] = nil
 				hook.Remove("EntityRemoved", n)
-				ply:SetViewEntity()
-				if activator.locksControls and activator.link and activator.link:IsValid() then
+				if chip.instance and chip.instance.data.viewEntityChanged then
+					chip.instance.data.viewEntityChanged = false
+					ply:SetViewEntity()
+				end
+				if IsValid(lockController) and IsValid(lockController.link) then
 					net.Start("starfall_lock_control")
-						net.WriteEntity(activator.link)
+						net.WriteEntity(lockController.link)
 						net.WriteBool(false)
 					net.Send(ply)
 				end
@@ -278,9 +254,9 @@ if SERVER then
 			if enabled then
 				huds[ply] = true
 				hook.Add("EntityRemoved",n,function(e) if e==ply or e==activator then disconnect(true) end end)
-				if activator.locksControls and activator.link and activator.link:IsValid() then
+				if IsValid(lockController) and IsValid(lockController.link) then
 					net.Start("starfall_lock_control")
-						net.WriteEntity(activator.link)
+						net.WriteEntity(lockController.link)
 						net.WriteBool(true)
 					net.Send(ply)
 				end
@@ -288,7 +264,10 @@ if SERVER then
 				disconnect(false)
 			end
 		else
-			if not enabled then ply:SetViewEntity() end
+			if not enabled and chip.instance and chip.instance.data.viewEntityChanged then
+				chip.instance.data.viewEntityChanged = false
+				ply:SetViewEntity()
+			end
 			huds[ply] = enabled or nil
 		end
 		runHudHooks(ply, chip, activator, enabled)
@@ -302,7 +281,7 @@ else
 		chip.ActiveHuds[ply] = enabled
 
 		if changed then
-			local enabledBy = chip.owner and chip.owner:IsValid() and (" by "..chip.owner:Nick()) or ""
+			local enabledBy = IsValid(chip.owner) and (" by "..chip.owner:Nick()) or ""
 			if enabled then
 				if (Hint_FirstPrint) then
 					LocalPlayer():ChatPrint("Starfall HUD enabled"..enabledBy..". NOTE: Type 'sf_hud_unlink' in the console to disconnect yourself from all HUDs.")
@@ -324,8 +303,9 @@ else
 			if v.ActiveHuds[ply] then
 				SF.EnableHud(ply, v, nil, false)
 
-				if v.instance.permissionOverrides then
-					v.instance.permissionOverrides.enablehud = nil
+				local instance = v.instance
+				if instance and instance.permissionOverrides then
+					instance.permissionOverrides.enablehud = nil
 				end
 			end
 		end
@@ -339,13 +319,13 @@ function SF.LinkEnt(self, ent, transmit)
 		local oldlink = self.link
 		self.link = ent
 
-		if oldlink and oldlink:IsValid() then
+		if IsValid(oldlink) then
 			local instance = oldlink.instance
 			if instance then
 				instance:runScriptHook("componentunlinked", instance.WrapObject(self))
 			end
 		end
-		if ent and ent:IsValid() then
+		if IsValid(ent) then
 			local instance = ent.instance
 			if instance then
 				instance:runScriptHook("componentlinked", instance.WrapObject(self))
@@ -354,8 +334,12 @@ function SF.LinkEnt(self, ent, transmit)
 	end
 	if SERVER and (changed or transmit) then
 		net.Start("starfall_processor_link")
-		net.WriteUInt(self:EntIndex(), 16)
-		net.WriteUInt(ent and ent:IsValid() and ent:EntIndex() or 0, 16)
+		net.WriteReliableEntity(self)
+		if IsValid(ent) then
+			net.WriteReliableEntity(ent)
+		else
+			net.WriteReliableEntity(Entity(0))
+		end
 		if transmit then net.Send(transmit) else net.Broadcast() end
 	end
 end

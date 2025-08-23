@@ -1,16 +1,19 @@
 -- Global to all starfalls
 local checkluatype = SF.CheckLuaType
 local dgetmeta = debug.getmetatable
+local IsValid = FindMetaTable("Entity").IsValid
 
 SF.Permissions.registerPrivilege("console.command", "Console command", "Allows the starfall to run console commands")
 
-local userdataLimit, printBurst, concmdBurst
+local userdataLimit, restartCooldown, printBurst, concmdBurst
 if SERVER then
 	userdataLimit = CreateConVar("sf_userdata_max", "1048576", { FCVAR_ARCHIVE }, "The maximum size of userdata (in bytes) that can be stored on a Starfall chip (saved in duplications).")
+	restartCooldown = CreateConVar("sf_restart_cooldown", 5, FCVAR_ARCHIVE, "The cooldown for using restart() on the same chip.", 0.1, 60)
 	printBurst = SF.BurstObject("print", "print", 3000, 10000, "The print burst regen rate in Bytes/sec.", "The print burst limit in Bytes")
 	concmdBurst = SF.BurstObject("concmd", "concmd", 1000, 1000, "The concmd burst regen rate in Bytes/sec.", "The concmd burst limit in Bytes")
 else
 	SF.Permissions.registerPrivilege("enablehud", "Allow enabling hud", "Allows the starfall to enable hud rendering", { client = { default = 1 } })
+	restartCooldown = CreateConVar("sf_restart_cooldown_cl", 5, FCVAR_ARCHIVE, "The cooldown for using restart() on the same chip.", 0.1, 60)
 end
 
 
@@ -38,11 +41,13 @@ local col_meta, cwrap, cunwrap = instance.Types.Color, instance.Types.Color.Wrap
 
 local builtins_library = instance.env
 
-local getent
-local getply
+local getent, getply
+local vunwrap1, vunwrap2
+local aunwrap1, aunwrap2
 instance:AddHook("initialize", function()
-	getent = instance.Types.Entity.GetEntity
-	getply = instance.Types.Player.GetPlayer
+	getent, getply = instance.Types.Entity.GetEntity, instance.Types.Player.GetPlayer
+	vunwrap1, vunwrap2 = vec_meta.QuickUnwrap1, vec_meta.QuickUnwrap2
+	aunwrap1, aunwrap2 = ang_meta.QuickUnwrap1, ang_meta.QuickUnwrap2
 end)
 
 --- Built in values. These don't need to be loaded; they are in the default builtins_library.
@@ -60,6 +65,7 @@ end
 --- Returns whoever created the chip
 -- @return Player Owner of the chip
 function builtins_library.owner()
+	if instance.player==SF.Superuser then SF.Throw("Superuser chips don't have an owner", 2) end
 	return instance.Types.Player.Wrap(instance.player)
 end
 
@@ -222,6 +228,11 @@ builtins_library.CLIENT = CLIENT
 -- @class field
 builtins_library.SERVER = SERVER
 
+--- Constant that denotes wether the code is executed on the owner's client
+-- @name builtins_library.OWNER
+-- @class field
+builtins_library.OWNER = CLIENT and instance.player == LocalPlayer()
+
 --- Returns if this is the first time this hook was predicted.
 -- @name builtins_library.isFirstTimePredicted
 -- @class function
@@ -301,13 +312,14 @@ end
 -- @param number quota The threshold where the soft error will be thrown. Ratio of current cpu to the max cpu usage. 0.5 is 50%
 function builtins_library.setSoftQuota(quota)
 	checkluatype(quota, TYPE_NUMBER)
-	instance.cpu_softquota = quota
+	instance.cpu_softquota = math.Clamp(quota, 0, 1)
 end
 
 --- Checks if the chip is capable of performing an action.
 -- @param string perm The permission id to check
 -- @param any obj Optional object to pass to the permission system.
 -- @return boolean Whether the client has granted the specified permission.
+-- @return string The reason the permission check failed
 function builtins_library.hasPermission(perm, obj)
 	checkluatype(perm, TYPE_STRING)
 	if not SF.Permissions.privileges[perm] then SF.Throw("Permission doesn't exist", 2) end
@@ -317,7 +329,7 @@ end
 if CLIENT then
 
 	--- Called when local client changed instance permissions
-	-- @name permissionrequest
+	-- @name PermissionRequest
 	-- @class hook
 	-- @client
 
@@ -367,7 +379,7 @@ if CLIENT then
 	function builtins_library.sendPermissionRequest()
 		if not SF.IsHUDActive(instance.entity) then SF.Throw("Player isn't connected to HUD!", 2) end
 		if sentPermRequest then SF.Throw("Can only send the permission request once!", 2) end
-		if instance.permissionRequest and not SF.Permissions.permissionRequestSatisfied( instance ) and not IsValid(SF.permPanel) then
+		if instance.permissionRequest and not SF.Permissions.permissionRequestSatisfied( instance ) and not (SF.permPanel and SF.permPanel:IsValid()) then
 			sentPermRequest = true
 			local pnl = vgui.Create("SFChipPermissions")
 			if pnl then
@@ -391,7 +403,7 @@ os_library.clock = os.clock
 --- Returns the date/time as a formatted string or in a table.
 -- See https://wiki.facepunch.com/gmod/Structures/DateData for the table structure
 -- @class function
--- @param string format The format string. If starts with an '!', it will use UTC timezone rather than the local timezone
+-- @param string? format The format string. If starts with an '!', it will use UTC timezone rather than the local timezone
 -- @param number? time Time to use for the format. Default os.time()
 -- @return string|table If format is equal to '*t' or '!*t' then it will return a table with DateData structure, otherwise a string
 os_library.date = function(format, time)
@@ -414,6 +426,21 @@ os_library.difftime = os.difftime
 -- @param table? dateData Optional table to generate the time from. This table's data is interpreted as being in the local timezone
 -- @return number Seconds passed since Unix epoch
 os_library.time = os.time
+
+--- Returns true if the operating system Windows is running gmod
+-- @class function
+-- @return boolean If the os is Windows
+os_library.isWindows = system.IsWindows
+
+--- Returns true if the operating system Linux is running gmod
+-- @class function
+-- @return boolean If the os is Linux
+os_library.isLinux = system.IsLinux
+
+--- Returns true if the operating system OSX is running gmod
+-- @class function
+-- @return boolean If the os is OSX
+os_library.isOSX = system.IsOSX
 
 
 -- ------------------------- Functions ------------------------- --
@@ -527,6 +554,10 @@ if SERVER then
 	-- @param ... printArgs Values to print. Colors before text will set the text color
 	function builtins_library.print(...)
 		local data, strlen, size = argsToChat(...)
+		if instance.player == SF.Superuser then
+			MsgC("[SF] ", unpack(data), "\n")
+			return
+		end
 		printBurst:use(instance.player, size)
 		sendPrintToPlayer(instance.player, data, false)
 	end
@@ -567,6 +598,21 @@ if SERVER then
 		printTableX(tbl, 0, { [tbl] = true })
 	end
 
+	--- Checks how much of the serverside print burst limit is remaining
+	--- The cost of each print is roughly equivalent to totalStringLength + 6*numColors + 2*numStrings
+	-- @server
+	-- @return number Size of the remaining print burst in bytes
+	function builtins_library.printSizeLeft()
+		return printBurst:check(instance.player)
+	end
+
+	--- Returns the refill rate of the serverside print burst limit
+	-- @server
+	-- @return number Number of bytes per second the print burst limit refills
+	function builtins_library.printRate()
+		return printBurst.rate
+	end
+
 	--- Execute a console command
 	-- @shared
 	-- @param string cmd Command to execute
@@ -576,6 +622,21 @@ if SERVER then
 		checkpermission(instance, nil, "console.command")
 		concmdBurst:use(instance.player, #cmd)
 		instance.player:ConCommand(cmd)
+	end
+
+	--- Checks how many concmds are remaining in the serverside burst limit
+	-- @server
+	-- @return number Number of concmds able to be ran serverside
+	function builtins_library.concmdLeft()
+		if not haspermission(instance,  nil, "console.command") then return 0 end
+		return concmdBurst:check(instance.player)
+	end
+
+	--- Returns how many concmds per second the user can run serverside
+	-- @server
+	-- @return number Number of concmds per second the user can run serverside
+	function builtins_library.concmdRate()
+		return concmdBurst.rate
 	end
 
 	--- Sets the chip's userdata that the duplicator tool saves. max 1MiB; can be changed with convar sf_userdata_max
@@ -594,7 +655,7 @@ if SERVER then
 	-- @server
 	-- @return string String data
 	function builtins_library.getUserdata()
-		return instance.entity.starfalluserdata or ""
+		return tostring(instance.entity.starfalluserdata or "")
 	end
 else
 	--- Sets the chip's display name
@@ -603,7 +664,7 @@ else
 	function builtins_library.setName(name)
 		checkluatype(name, TYPE_STRING)
 		local e = instance.entity
-		if (e and e:IsValid()) then
+		if IsValid(e) then
 			e.name = string.sub(name, 1, 256)
 		end
 	end
@@ -614,7 +675,7 @@ else
 	function builtins_library.setAuthor(author)
 		checkluatype(author, TYPE_STRING)
 		local e = instance.entity
-		if (e and e:IsValid()) then
+		if IsValid(e) then
 			e.author = string.sub(author, 1, 256)
 		end
 	end
@@ -633,14 +694,19 @@ else
 	-- @param number mtype How the message should be displayed. See http://wiki.facepunch.com/gmod/Enums/HUD
 	-- @param string text The message text.
 	function builtins_library.printMessage(mtype, text)
-		if instance.player ~= LocalPlayer() then return end
 		checkluatype(text, TYPE_STRING)
-		instance.player:PrintMessage(mtype, text)
+		if instance.player == LocalPlayer() then
+			instance.player:PrintMessage(mtype, text)
+		elseif instance.player == SF.Superuser then
+			LocalPlayer():PrintMessage(mtype, text)
+		end
 	end
 
 	function builtins_library.print(...)
 		if instance.player == LocalPlayer() then
 			chat.AddText(unpack((argsToChat(...))))
+		elseif instance.player == SF.Superuser then
+			chat.AddText(unpack((argsToChat(builtins_library.Color(5,125,222), "[SF] ", builtins_library.Color(255,255,255), ...))))
 		end
 	end
 
@@ -666,7 +732,7 @@ else
 
 	function builtins_library.printTable(tbl)
 		checkluatype(tbl, TYPE_TABLE)
-		if instance.player == LocalPlayer() then
+		if instance.player == LocalPlayer() or instance.player == SF.Superuser then
 			printTableX(tbl, 0, { tbl = true })
 		end
 	end
@@ -706,9 +772,7 @@ end
 function builtins_library.getScript(path)
 	checkluatype(path, TYPE_STRING)
 	local curdir = SF.GetExecutingPath() or ""
-	path = SF.ChoosePath(path, curdir, function(testpath)
-		return instance.scripts[testpath]
-	end) or path
+	path = instance.ppdata:ResolvePath(path, curdir) or path
 	return instance.source[path], instance.scripts[path]
 end
 
@@ -739,40 +803,37 @@ end
 --- Sets the chip to allow other chips to view its sources
 -- @param boolean enable If true, allow sharing scripts
 function builtins_library.shareScripts(enable)
-	instance.shareScripts = (enable == true) or nil
+	checkluatype(enable, TYPE_BOOL)
+	instance.shareScripts = enable
 end
 
 --- Runs an included script and caches the result.
 -- The path must be an actual path, including the file extension and using slashes for directory separators instead of periods.
 -- @param string path The file path to include. Make sure to --@include it
+-- @param ... args Optional arguments to provide to the script (access them using vararg ...)
 -- @return any Return value of the script
-function builtins_library.require(path)
+function builtins_library.require(path, ...)
 	checkluatype(path, TYPE_STRING)
 
 	local curdir = SF.GetExecutingPath() or ""
+	path = instance.ppdata:ResolvePath(path, curdir) or path
 
-	path = SF.ChoosePath(path, curdir, function(testpath)
-		return instance.scripts[testpath]
-	end) or path
-
-	return instance:require(path)
+	return instance:require(path, ...)
 end
 
 --- Runs all included scripts in a directory and caches the results.
 -- The path must be an actual path, including the file extension and using slashes for directory separators instead of periods.
 -- @param string path The directory to include. Make sure to --@includedir it
--- @param table loadpriority Table of files that should be loaded before any others in the directory
+-- @param table? loadpriority Table of files that should be loaded before any others in the directory
 -- @return table Table of return values of the scripts
 function builtins_library.requiredir(path, loadpriority)
 	checkluatype(path, TYPE_STRING)
 	if loadpriority~=nil then checkluatype(loadpriority, TYPE_TABLE) end
 
-	local curdir = SF.GetExecutingPath() or ""
-
-	path = SF.ChoosePath(path, curdir, function(testpath)
-		testpath = string.PatternSafe(testpath)
+	path = SF.ChoosePath(path, string.GetPathFromFilename(SF.GetExecutingPath() or ""), function(testpath)
+		testpath = testpath .. "/"
 		for file in pairs(instance.scripts) do
-			if string.match(file, "^"..testpath.."/[^/]+%.txt$") or string.match(file, "^"..testpath.."/[^/]+%.lua$") then
+			if testpath == string.GetPathFromFilename(file) then
 				return true
 			end
 		end
@@ -805,16 +866,15 @@ end
 --- Runs an included script, but does not cache the result.
 -- Pretty much like standard Lua dofile()
 -- @param string path The file path to include. Make sure to --@include it
+-- @param ... args Optional arguments to provide to the script (access them using vararg ...)
 -- @return ... Return value(s) of the script
-function builtins_library.dofile(path)
+function builtins_library.dofile(path, ...)
 	checkluatype(path, TYPE_STRING)
 
 	local curdir = SF.GetExecutingPath() or ""
+	path = instance.ppdata:ResolvePath(path, curdir) or path
 
-	path = SF.ChoosePath(path, curdir, function(testpath)
-		return instance.scripts[testpath]
-	end) or path
-	return (instance.scripts[path] or SF.Throw("Can't find file '" .. path .. "' (did you forget to --@include it?)", 2))()
+	return (instance.scripts[path] or SF.Throw("Can't find file '" .. path .. "' (did you forget to --@include it?)", 2))(...)
 end
 
 --- Runs all included scripts in directory, but does not cache the result.
@@ -825,12 +885,10 @@ function builtins_library.dodir(path, loadpriority)
 	checkluatype(path, TYPE_STRING)
 	if loadpriority ~= nil then checkluatype(loadpriority, TYPE_TABLE) end
 
-	local curdir = SF.GetExecutingPath() or ""
-
-	path = SF.ChoosePath(path, curdir, function(testpath)
-		testpath = string.PatternSafe(testpath)
+	path = SF.ChoosePath(path, string.GetPathFromFilename(SF.GetExecutingPath() or ""), function(testpath)
+		testpath = testpath .. "/"
 		for file in pairs(instance.scripts) do
-			if string.match(file, "^"..testpath.."/[^/]+%.txt$") or string.match(file, "^"..testpath.."/[^/]+%.lua$") then
+			if testpath == string.GetPathFromFilename(file) then
 				return true
 			end
 		end
@@ -1143,10 +1201,10 @@ end
 function builtins_library.worldToLocal(pos, ang, newSystemOrigin, newSystemAngles)
 
 	local localPos, localAngles = WorldToLocal(
-		vunwrap(pos),
-		aunwrap(ang),
-		vunwrap(newSystemOrigin),
-		aunwrap(newSystemAngles)
+		vunwrap1(pos),
+		aunwrap1(ang),
+		vunwrap2(newSystemOrigin),
+		aunwrap2(newSystemAngles)
 	)
 
 	return vwrap(localPos), awrap(localAngles)
@@ -1162,10 +1220,10 @@ end
 function builtins_library.localToWorld(localPos, localAng, originPos, originAngle)
 
 	local worldPos, worldAngles = LocalToWorld(
-		vunwrap(localPos),
-		aunwrap(localAng),
-		vunwrap(originPos),
-		aunwrap(originAngle)
+		vunwrap1(localPos),
+		aunwrap1(localAng),
+		vunwrap2(originPos),
+		aunwrap2(originAngle)
 	)
 
 	return vwrap(worldPos), awrap(worldAngles)
@@ -1183,12 +1241,36 @@ function builtins_library.enableHud(ply, active)
 		SF.EnableHud(ply, instance.entity, nil, active)
 	else
 		local vehicle = ply:GetVehicle()
-		if vehicle:IsValid() and SF.Permissions.getOwner(vehicle)==instance.player then
+		if IsValid(vehicle) and SF.Permissions.getOwner(vehicle)==instance.player then
 			SF.EnableHud(ply, instance.entity, vehicle, active)
 		else
 			SF.Throw("Player must be sitting in owner's vehicle or be owner of the chip!", 2)
 		end
 	end
+end
+
+--- Restarts a chip owned by yourself.
+-- Only restarts the realm that this gets called in.
+-- @param Entity? chip The chip to restart. If nil, it will restart the current chip.
+function builtins_library.restart(chip)
+	if chip then
+		chip = getent(chip)
+		if not (chip.Starfall and chip.sfdata) then SF.Throw("Entity has no starfall data", 2) end
+		if chip.owner ~= instance.player then SF.Throw("You don't own that starfall", 2) end
+	else
+		chip = instance.entity
+	end
+
+	local now = CurTime()
+	if (chip.nextRestartTime or 0) > now then SF.Throw("That starfall is on restart() cooldown", 2) end
+
+	chip.nextRestartTime = now + restartCooldown:GetFloat()
+
+	timer.Simple(0, function()
+		if IsValid(chip) then
+			chip:Compile()
+		end
+	end)
 end
 
 --- Creates a 'middleclass' class object that can be used similarly to Java/C++ classes. See https://github.com/kikito/middleclass for examples.
@@ -1236,6 +1318,11 @@ end
 -- @name model
 -- @class directive
 -- @param model String of the model
+
+--- Precaches models that may take a while to load (max 16). --@precachemodel models/props_junk/watermelon01.mdl
+-- @name precachemodel
+-- @class directive
+-- @param model String of the model to precache
 
 --- Set the current file to only run on the server. Shared is default. --@server
 -- @name server

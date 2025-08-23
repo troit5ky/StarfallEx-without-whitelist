@@ -9,7 +9,6 @@ registerprivilege("material.imagecreate", "Create material from image", "Allows 
 registerprivilege("material.urlcreate", "Create material from online image", "Allows users to create a new material from an online image.", { client = {}, urlwhitelist = {} })
 registerprivilege("material.datacreate", "Create material from base64 image data", "Allows users to create a new material from base64 image data.", { client = {} })
 
-local cv_max_materials = CreateConVar("sf_render_maxusermaterials", "40", { FCVAR_ARCHIVE })
 local cv_max_data_material_size = CreateConVar("sf_render_maxdatamaterialsize", "1000000", { FCVAR_ARCHIVE })
 
 -- Make sure to update the material.create doc if you add stuff to this list.
@@ -129,7 +128,7 @@ local default_values = {
 	["$treeswaystrength"] = {"SetFloat", 10},
 }
 
-local material_bank = SF.ResourceHandler(cv_max_materials:GetInt(),
+local material_bank = SF.ResourceHandler("render_usermaterials", "user materials", 40, "The max number of user created materials",
 	function(shader, i)
 		return CreateMaterial("sf_material_" .. shader .. "_" .. i, shader, {})
 	end,
@@ -138,8 +137,7 @@ local material_bank = SF.ResourceHandler(cv_max_materials:GetInt(),
 			mat:SetInt("$flags",32816) --MATERIAL_VAR_VERTEXCOLOR + MATERIAL_VAR_VERTEXALPHA + MATERIAL_VAR_IGNOREZ
 		end
 	end,
-	FindMetaTable("IMaterial").GetShader,
-	function(material)
+	function(shader, material)
 		-- This is necessary because when the material is going to be reused
 		-- it will set some of its undefined parameters to old values (engine bug?)
 		material:SetFloat("$alpha", 1)
@@ -150,14 +148,9 @@ local material_bank = SF.ResourceHandler(cv_max_materials:GetInt(),
 		end
 	end
 )
-cvars.AddChangeCallback( "sf_render_maxusermaterials", function()
-	material_bank.max = cv_max_materials:GetInt()
-end)
 
 local blacklisted_keys = {
-	["$flags2"] = true,
-	["$frame"] = true,
-	["$frame2"] = true,
+	["$flags2"] = true
 }
 local function checkkey(key)
 	checkluatype(key, TYPE_STRING, 2)
@@ -174,138 +167,6 @@ local function tex2str(t)
 	end
 
 	return t
-end
-
-local LoadingTextureQueue = {}
-local Panel
-local function NextInTextureQueue()
-	if not Panel then
-		Panel = SF.URLTextureLoader
-		if not Panel then
-			Panel = vgui.Create("DHTML")
-			Panel:SetSize(1024, 1024)
-			Panel:SetAlpha(0)
-			Panel:SetMouseInputEnabled(false)
-			Panel:SetHTML(
-			[[<html style="overflow:hidden"><body><script>
-			if (!requestAnimationFrame)
-				var requestAnimationFrame = webkitRequestAnimationFrame;
-			function renderImage(){
-				requestAnimationFrame(function(){
-					requestAnimationFrame(function(){
-						document.body.offsetWidth
-						requestAnimationFrame(function(){
-							sf.imageLoaded(img.width, img.height);
-						});
-					});
-				});
-			}
-			var img = new Image();
-			img.style.position="absolute";
-			img.onload = renderImage;
-			img.onerror = function (){sf.imageErrored();}
-			document.body.appendChild(img);
-			</script></body></html>]])
-			Panel:Hide()
-			SF.URLTextureLoader = Panel
-			timer.Simple(0.5, NextInTextureQueue)
-			return
-		end
-	end
-
-	local requestTbl = LoadingTextureQueue[1]
-	if requestTbl then
-		if requestTbl.Instance.error then
-			-- Chip already deinitialized so don't need to free anything
-			table.remove(LoadingTextureQueue, 1)
-			timer.Simple(0, NextInTextureQueue)
-			return
-		end
-
-		local function applyTexture(w, h)
-			--Timer to prevent being in javascript stack frame
-			if requestTbl.Instance.error then
-				table.remove(LoadingTextureQueue, 1)
-				timer.Simple(0, NextInTextureQueue)
-			else
-				local function imageDone(usedLayout)
-					if requestTbl.Loaded then return end
-					requestTbl.Loaded = true
-
-					hook.Add("PreRender","SF_HTMLPanelCopyTexture",function()
-						Panel:UpdateHTMLTexture()
-						local mat = Panel:GetHTMLMaterial()
-						if not mat then return end
-
-						render.PushRenderTarget(requestTbl.Texture)
-							render.Clear(0, 0, 0, 0, false, false)
-							cam.Start2D()
-							surface.SetMaterial(mat)
-							surface.SetDrawColor(255, 255, 255)
-							surface.DrawTexturedRect(0, 0, 1024, 1024)
-							cam.End2D()
-						render.PopRenderTarget()
-
-						hook.Remove("PreRender","SF_HTMLPanelCopyTexture")
-						table.remove(LoadingTextureQueue, 1)
-						timer.Simple(0, function()
-							if requestTbl.CallbackDone then requestTbl.CallbackDone() end
-							NextInTextureQueue()
-						end)
-					end)
-				end
-
-				if requestTbl.Usedlayout then
-					imageDone()
-				else
-					local function layout(x,y,w,h)
-						if requestTbl.Usedlayout then SF.Throw("You can only use layout once", 2) end
-						checkluatype(x, TYPE_NUMBER)
-						checkluatype(y, TYPE_NUMBER)
-						checkluatype(w, TYPE_NUMBER)
-						checkluatype(h, TYPE_NUMBER)
-						requestTbl.Usedlayout = true
-						Panel:RunJavascript([[
-							img.style.left=']]..x..[[px';img.style.top=']]..y..[[px';img.width=]]..w..[[;img.height=]]..h..[[;
-							renderImage();
-						]])
-					end
-
-					if requestTbl.Callback then requestTbl.Callback(w, h, layout, false) end
-					if not requestTbl.Usedlayout then
-						requestTbl.Usedlayout = true
-						imageDone()
-					end
-				end
-			end
-		end
-		local function errorTexture()
-			if not requestTbl.Instance.error and requestTbl.Callback then requestTbl.Callback() end
-			table.remove(LoadingTextureQueue, 1)
-			timer.Simple(0, NextInTextureQueue)
-		end
-
-		Panel:AddFunction("sf", "imageLoaded", applyTexture)
-		Panel:AddFunction("sf", "imageErrored", errorTexture)
-		Panel:RunJavascript(
-		[[img.removeAttribute("width");
-		img.removeAttribute("height");
-		img.style.left="0px";
-		img.style.top="0px";
-		img.src="]] .. string.JavascriptSafe( requestTbl.Url ) .. [[";]]..
-		(BRANCH == "unknown" and "\nif(img.complete)renderImage();" or ""))
-		Panel:Show()
-
-		timer.Create("SF_URLTextureTimeout", 10, 1, function()
-			if requestTbl.Callback then requestTbl.Callback() end
-			table.remove(LoadingTextureQueue, 1)
-			NextInTextureQueue()
-		end)
-
-	else
-		timer.Remove("SF_URLTextureTimeout")
-		Panel:Hide()
-	end
 end
 
 --- `material` library is allows creating material objects which are used for controlling shaders in rendering.
@@ -336,10 +197,14 @@ local ang_meta, awrap, aunwrap = instance.Types.Angle, instance.Types.Angle.Wrap
 local col_meta, cwrap, cunwrap = instance.Types.Color, instance.Types.Color.Wrap, instance.Types.Color.Unwrap
 local matrix_meta, mwrap, munwrap = instance.Types.VMatrix, instance.Types.VMatrix.Wrap, instance.Types.VMatrix.Unwrap
 
+local vunwrap1
+instance:AddHook("initialize", function()
+	vunwrap1 = vec_meta.QuickUnwrap1
+end)
 local usermaterials = {}
 instance:AddHook("deinitialize", function()
 	for k in pairs(usermaterials) do
-		material_bank:free(instance.player, k)
+		material_bank:free(instance.player, k, k:GetShader())
 	end
 end)
 
@@ -495,12 +360,11 @@ function material_library.create(shader)
 	checkpermission(instance, nil, "material.create")
 	if not allowed_shaders[shader] then SF.Throw("Tried to use unsupported shader: "..shader, 2) end
 	local m = material_bank:use(instance.player, shader)
-	if not m then SF.Throw("Exceeded the maximum user materials", 2) end
 	usermaterials[m] = true
 	return wrap(m)
 end
 
-local image_params = {["nocull"] = true,["alphatest"] = true,["mips"] = true,["noclamp"] = true,["smooth"] = true}
+local image_params = {["nocull"] = true,["alphatest"] = true,["mips"] = true,["noclamp"] = true,["smooth"] = true,["ignorez"] = true,["vertexlitgeneric"] = true}
 --- Creates a .jpg or .png material from file
 --- Can't be modified
 -- @param string path The path to the image file, must be a jpg or png image
@@ -514,7 +378,7 @@ function material_library.createFromImage(path, params)
 	local ext = string.GetExtensionFromFilename(path)
 	if ext ~= "jpg" and ext ~= "png" then SF.Throw("Expected a .jpg or .png file", 2) end
 
-	if not (file.Exists("materials/" .. path, "GAME") or (string.sub(path,1,5)=="data/" and file.Exists(path,"GAME"))) then
+	if not (file.Exists("materials/" .. path, "GAME") or ((string.sub(path,1,5)=="data/" or string.sub(path,1,12)=="data_static/") and file.Exists(path, "GAME"))) then
 		SF.Throw("The material path is invalid", 2)
 	end
 
@@ -531,9 +395,7 @@ end
 
 --- Frees a user created material allowing you to create others
 function material_methods:destroy()
-
 	local m = unwrap(self)
-	if not m then SF.Throw("The material is already destroyed?", 2) end
 
 	local name = m:GetName()
 	local rt = instance.data.render.rendertargets[name]
@@ -541,13 +403,10 @@ function material_methods:destroy()
 		instance.env.render.destroyRenderTarget(name)
 	end
 
-	local sensitive2sf, sf2sensitive = material_meta.sensitive2sf, material_meta.sf2sensitive
-	sensitive2sf[m] = nil
-	sf2sensitive[self] = nil
-	dsetmeta(self, nil)
-
+	material_meta.sf2sensitive[self] = nil
+	material_meta.sensitive2sf[m] = nil
 	usermaterials[m] = nil
-	material_bank:free(instance.player, m)
+	material_bank:free(instance.player, m, m:GetShader())
 end
 function lmaterial_methods:destroy()
 end
@@ -716,7 +575,7 @@ end
 -- If the texture in key is not set to a rendertarget, a rendertarget will be created and used.
 -- @param string key The key name to set. $basetexture is the key name for most purposes.
 -- @param string url The url or base64 data
--- @param function? cb An optional callback called when image is loaded. Passes nil if it fails or Passes the material, url, width, height, and layout function which can be called with x, y, w, h to reposition the image in the texture
+-- @param function? cb An optional callback called when image is loaded. Passes nil if it fails or Passes the material, url, width, height, and layout function which can be called with x, y, w, h, pixelated to reposition the image in the texture. Setting the optional 'pixelated' argument to True tells the image to use nearest-neighbor interpolation
 -- @param function? done An optional callback called when the image is done loading. Passes the material, url
 function material_methods:setTextureURL(key, url, cb, done)
 	checkkey(key)
@@ -753,25 +612,19 @@ function material_methods:setTextureURL(key, url, cb, done)
 		end
 	end
 
-	requestTbl = {
-		Instance = instance,
-		Texture = texture,
-		Url = url
-	}
+	local callback, donecallback
 	if cb then
-		requestTbl.Callback = function(w, h, layout)
+		callback = function(w, h, layout)
 			if w then instance:runFunction(cb, self, url, w, h, layout) else instance:runFunction(cb) end
 		end
 	end
 	if done then
-		requestTbl.CallbackDone = function()
+		donecallback = function()
 			instance:runFunction(done, self, url)
 		end
 	end
-
-	local inqueue = #LoadingTextureQueue
-	LoadingTextureQueue[inqueue + 1] = requestTbl
-	if inqueue == 0 then timer.Simple(0, NextInTextureQueue) end
+	
+	SF.G_HttpTextureLoader:request(SF.HttpTextureRequest(url, instance, texture, callback, donecallback))
 end
 
 --- Sets a rendertarget texture to the specified texture key
@@ -800,7 +653,7 @@ end
 -- @param Vector v The value to set it to
 function material_methods:setVector(key, v)
 	checkkey(key)
-	unwrap(self):SetVector(key, vunwrap(v))
+	unwrap(self):SetVector(key, vunwrap1(v))
 end
 
 end

@@ -664,9 +664,10 @@ local plyMeshCount = SF.LimitObject("mesh", "total meshes", 1000, "How many mesh
 
 function plyTriangleRenderBurst:calc(obj)
 	local t = RealTime()
-	local ret = math.min(obj.val + (t - obj.lasttick)/RealFrameTime() * self.rate, self.max)
+	local new = math.min(obj.val + (t - obj.lasttick)/RealFrameTime() * self.rate, self.max)
+	obj.val = new
 	obj.lasttick = t
-	return ret
+	return new
 end
 
 --- Mesh library.
@@ -695,11 +696,13 @@ local mwrap = instance.Types.VMatrix.Wrap
 
 local thread_yield
 local vector, angle, worldtolocal
+local vunwrap1, vunwrap2, vunwrap3, vunwrap4
 instance:AddHook("initialize", function()
 	vector = instance.env.Vector
 	angle = instance.env.Angle
 	worldtolocal = instance.env.worldToLocal
 	thread_yield = instance.Libraries.coroutine.yield
+	vunwrap1, vunwrap2, vunwrap3, vunwrap4 = vec_meta.QuickUnwrap1, vec_meta.QuickUnwrap2, vec_meta.QuickUnwrap3, vec_meta.QuickUnwrap4
 end)
 
 --- Parses obj data into a table of vertices, normals, texture coordinates, colors, and tangents
@@ -1064,14 +1067,14 @@ if CLIENT then
 	-- @param Vector normal Normal
 	-- @client
 	function mesh_library.writeNormal(normal)
-		mesh.Normal(vunwrap(normal))
+		mesh.Normal(vunwrap1(normal))
 	end
 
 	--- Sets the vertex position
 	-- @param Vector position Position
 	-- @client
 	function mesh_library.writePosition(pos)
-		mesh.Position(vunwrap(pos))
+		mesh.Position(vunwrap1(pos))
 	end
 
 	--- Sets the vertex texture coordinates
@@ -1098,9 +1101,10 @@ if CLIENT then
 	-- @param Vector v2 Vertex2 position
 	-- @param Vector v3 Vertex3 position
 	-- @param Vector v4 Vertex4 position
+	-- @param Color col The color for the vertices.
 	-- @client
-	function mesh_library.writeQuad(v1, v2, v3, v4)
-		mesh.Quad(vunwrap(v1), vunwrap(v2), vunwrap(v3), vunwrap(v4))
+	function mesh_library.writeQuad(v1, v2, v3, v4, col)
+		mesh.Quad(vunwrap1(v1), vunwrap2(v2), vunwrap3(v3), vunwrap4(v4), col)
 	end
 
 	--- Draws a quad using a position, normal and size
@@ -1108,9 +1112,10 @@ if CLIENT then
 	-- @param Vector normal
 	-- @param number w
 	-- @param number h
+	-- @param Color col The color for the vertices.
 	-- @client
-	function mesh_library.writeQuadEasy(position, normal, w, h)
-		mesh.QuadEasy(vunwrap(position), vunwrap(normal), w, h)
+	function mesh_library.writeQuadEasy(position, normal, w, h, col)
+		mesh.QuadEasy(vunwrap1(position), vunwrap2(normal), w, h, col)
 	end
 
 	--- Pushes the vertex data onto the render stack

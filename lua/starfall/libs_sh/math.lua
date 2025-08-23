@@ -14,6 +14,13 @@ return function(instance)
 local vec_meta, vwrap, vunwrap = instance.Types.Vector, instance.Types.Vector.Wrap, instance.Types.Vector.Unwrap
 local ang_meta, awrap, aunwrap = instance.Types.Angle, instance.Types.Angle.Wrap, instance.Types.Angle.Unwrap
 
+local vunwrap1, vunwrap2, vunwrap3
+local aunwrap1, aunwrap2
+instance:AddHook("initialize", function()
+	vunwrap1, vunwrap2, vunwrap3 = vec_meta.QuickUnwrap1, vec_meta.QuickUnwrap2, vec_meta.QuickUnwrap3
+	aunwrap1, aunwrap2 = ang_meta.QuickUnwrap1, ang_meta.QuickUnwrap2
+end)
+
 local math_library = instance.Libraries.math
 
 --- Calculates the absolute value of a number (effectively removes any negative sign).
@@ -231,6 +238,12 @@ math_library.pi = math.pi
 -- @return number Exponent power of base
 math_library.pow = math.pow
 
+--- Returns factorial of given value
+-- @class function
+-- @param number value The number value
+-- @return number Factorial of value
+math_library.factorial = math.Factorial
+
 --- Converts an angle from degrees to radians.
 -- @class function
 -- @param number deg Angle in degrees
@@ -267,6 +280,7 @@ math_library.remap = math.Remap
 -- @class function
 -- @param number value The number to be rounded
 -- @param number? decimals Optional decimal places to round to. Defaults to 0
+-- @return number The rounded value
 math_library.round = math.Round
 
 --- Calculates the sine of given angle.
@@ -340,12 +354,12 @@ end
 --- Calculates point between first and second angle using given fraction and linear interpolation.
 -- @class function
 -- @param number ratio Ratio of progress through values
--- @param number from Angle to begin from
--- @param number to Angle to end at
--- @return number The interpolated angle
+-- @param Angle from Angle to begin from
+-- @param Angle to Angle to end at
+-- @return Angle The interpolated angle
 function math_library.lerpAngle(ratio, from, to)
 	checkluatype(ratio, TYPE_NUMBER)
-	return awrap(LerpAngle(ratio, aunwrap(from), aunwrap(to)))
+	return awrap(LerpAngle(ratio, aunwrap1(from), aunwrap2(to)))
 end
 
 --- Calculates point between first and second vector using given fraction and linear interpolation.
@@ -356,7 +370,7 @@ end
 -- @return Vector The interpolated vector
 function math_library.lerpVector(ratio, from, to)
 	checkluatype(ratio, TYPE_NUMBER)
-	return vwrap(LerpVector(ratio, vunwrap(from), vunwrap(to)))
+	return vwrap(LerpVector(ratio, vunwrap1(from), vunwrap2(to)))
 end
 
 --- Gets the distance between a line and a point in 3d space
@@ -367,7 +381,7 @@ end
 -- @return Vector Nearest point on line
 -- @return number Distance along line from start
 function math_library.distanceToLine(lineStart, lineEnd, pointPos)
-	local nearDist, nearPoint, startDist = util.DistanceToLine(vunwrap(lineStart), vunwrap(lineEnd), vunwrap(pointPos))
+	local nearDist, nearPoint, startDist = util.DistanceToLine(vunwrap1(lineStart), vunwrap2(lineEnd), vunwrap3(pointPos))
 	return nearDist, vwrap(nearPoint), startDist
 end
 

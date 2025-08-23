@@ -6,6 +6,8 @@ registerprivilege("file.read", "Read files", "Allows the user to read files from
 registerprivilege("file.write", "Write files", "Allows the user to write files to data/sf_filedata directory", { client = { default = 1 } })
 registerprivilege("file.writeTemp", "Write temporary files", "Allows the user to write temp files to data/sf_filedatatemp directory", { client = {} })
 registerprivilege("file.exists", "File existence check", "Allows the user to determine whether a file in data/sf_filedata exists", { client = { default = 1 } })
+registerprivilege("file.existsInGame", "File existence check", "Allows the user to determine whether a file in game dir exists", { client = { default = 1 } })
+registerprivilege("file.isDir", "Directory check", "Allows the user to determine whether a file in data/sf_filedata is a directory", { client = { default = 1 } })
 registerprivilege("file.find", "File find", "Allows the user to see what files are in data/sf_filedata", { client = { default = 1 } })
 registerprivilege("file.findInGame", "File find in garrysmod", "Allows the user to see what files are in garrysmod", { client = { default = 1 } })
 registerprivilege("file.open", "Get a file object", "Allows the user to use a file object", { client = { default = 1 } })
@@ -17,6 +19,7 @@ file.CreateDir("sf_filedatatemp/")
 local cv_temp_maxfiles = CreateConVar("sf_file_tempmax", "256", { FCVAR_ARCHIVE }, "The max number of files a player can store in temp")
 local cv_temp_maxusersize = CreateConVar("sf_file_tempmaxusersize", "64", { FCVAR_ARCHIVE }, "The max total of megabytes a player can store in temp")
 local cv_temp_maxsize = CreateConVar("sf_file_tempmaxsize", "128", { FCVAR_ARCHIVE }, "The max total of megabytes allowed in temp")
+local cv_temp_maxage = CreateConVar("sf_file_tempmaxage", "604800", { FCVAR_ARCHIVE }, "The max age of a temp file in seconds (default 7 days)")
 local cv_max_concurrent_reads = CreateConVar("sf_file_asyncmax", "10", { FCVAR_ARCHIVE }, "The max concurrent async reads allowed")
 
 --- File functions. Allows modification of files.
@@ -36,23 +39,36 @@ SF.RegisterType("File", true, false)
 local TempFileCache = {}
 do
 	function TempFileCache:Initialize()
+		local maxtime = cv_temp_maxage:GetInt()
+		local ostime = os.time()
 		local entries = {}
 		local files, dirs = file.Find("sf_filedatatemp/*", "DATA")
 		for k, plyid in ipairs(dirs) do
 			local dir = "sf_filedatatemp/"..plyid
 			files = file.Find(dir.."/*", "DATA")
-			if next(files)==nil then SF.DeleteFolder(dir) else
-				for k, filen in ipairs(files) do
-					local path = dir.."/"..filen
-					local time, size = file.Time(path, "DATA"), file.Size(path, "DATA")
+			local fileCount = #files
+			for k, filen in ipairs(files) do
+				local path = dir.."/"..filen
+				local time = file.Time(path, "DATA")
+
+				if ostime > time + maxtime then
+					file.Delete(path)
+					fileCount = fileCount - 1
+				else
+					local size = file.Size(path, "DATA")
 					entries[path] = {path = path, plyid = plyid, time = time, size = size}
 				end
+			end
+
+			if fileCount == 0 then
+				SF.DeleteFolder(dir)
 			end
 		end
 		self.entries = entries
 	end
 
-	function TempFileCache:Write(plyid, filename, data)
+	function TempFileCache:Write(ply, filename, data)
+		local plyid = ply:SteamID64()
 		local dir = "sf_filedatatemp/"..plyid
 		local path = dir.."/"..filename
 		local ok, reason = self:CheckSize(plyid, path, #data)
@@ -63,7 +79,7 @@ do
 			end
 			self.entries[path] = {path = path, plyid = plyid, time = os.time(), size = #data}
 			file.CreateDir(dir)
-			print("[SF] Writing temp file: " .. path)
+			print("[SF owner=\""..tostring(ply).."\"] Writing temp file: " .. path)
 			local f = file.Open(path, "wb", "DATA")
 			if not f then SF.Throw("Couldn't open file for writing!", 3) end
 			f:Write(data)
@@ -157,7 +173,6 @@ do
 
 	TempFileCache:Initialize()
 end
-
 
 return function(instance)
 local checkpermission = instance.player ~= SF.Superuser and SF.Permissions.check or function() end
@@ -274,7 +289,7 @@ function file_library.writeTemp(filename, data)
 	checkExtension(filename)
 	filename = string.lower(string.GetFileFromFilename(filename))
 
-	local path = TempFileCache:Write(instance.player:SteamID64(), filename, data)
+	local path = TempFileCache:Write(instance.player, filename, data)
 	tempfilewrites = tempfilewrites + 1
 	return path
 end
@@ -318,6 +333,24 @@ function file_library.exists(path)
 	return file.Exists("sf_filedata/" .. SF.NormalizePath(path), "DATA")
 end
 
+--- Checks if a file exists in path relative to gmod
+-- @param string path Filepath in game folder
+-- @return boolean? True if exists, false if not, nil if error
+function file_library.existsInGame(path)
+	checkpermission (instance, path, "file.existsInGame")
+	checkluatype (path, TYPE_STRING)
+	return file.Exists(SF.NormalizePath(path), "GAME")
+end
+
+--- Checks if a given file is a directory or not
+-- @param string path Filepath relative to data/sf_filedata/.
+-- @return boolean True if given path is a directory, false if it's a file
+function file_library.isDir(path)
+	checkpermission (instance, path, "file.isDir")
+	checkluatype (path, TYPE_STRING)
+	return file.IsDir("sf_filedata/" .. SF.NormalizePath(path), "DATA")
+end
+
 --- Deletes a file
 -- @param string path Filepath relative to data/sf_filedata/.
 -- @return boolean? True if successful, nil if it wasn't found
@@ -325,6 +358,24 @@ function file_library.delete(path)
 	checkpermission (instance, path, "file.write")
 	checkluatype (path, TYPE_STRING)
 	path = "sf_filedata/" .. SF.NormalizePath(path)
+	if file.Exists(path, "DATA") then
+		file.Delete(path)
+		return true
+	end
+end
+
+--- Deletes a temp file
+-- @param string filename The temp file name. Must be only a file and not a path
+-- @return boolean? True if successful, nil if it wasn't found
+function file_library.deleteTemp(filename)
+	checkpermission (instance, nil, "file.writeTemp")
+	checkluatype (filename, TYPE_STRING)
+	
+	if #filename > 128 then SF.Throw("Filename is too long!", 2) end
+	checkExtension(filename)
+	filename = string.lower(string.GetFileFromFilename(filename))
+
+	local path = "sf_filedatatemp/"..instance.player:SteamID64().."/"..filename
 	if file.Exists(path, "DATA") then
 		file.Delete(path)
 		return true
@@ -455,10 +506,29 @@ function file_methods:readLong()
 	return unwrap(self):ReadLong()
 end
 
+--- Reads an unsigned long and advances the file position
+-- @return number UInt32 number
+function file_methods:readULong()
+	return unwrap(self):ReadULong()
+end
+
 --- Reads a short and advances the file position
 -- @return number Int16 number
 function file_methods:readShort()
 	return unwrap(self):ReadShort()
+end
+
+--- Reads an unsigned short and advances the file position
+-- @return number UInt16 number
+function file_methods:readUShort()
+	return unwrap(self):ReadUShort()
+end
+
+--- Reads an unsigned 64-bit integer and advances the file position
+--- Note: Since Lua cannot store full 64-bit integers, this function returns a string.
+-- @return string UInt64 number
+function file_methods:readUInt64()
+	return unwrap(self):ReadUInt64()
 end
 
 --- Writes a string to the file and advances the file position
@@ -503,11 +573,33 @@ function file_methods:writeLong(x)
 	unwrap(self):WriteLong(x)
 end
 
+--- Writes an unsigned long and advances the file position
+-- @param number x The unsigned long to write
+function file_methods:writeULong(x)
+	checkluatype (x, TYPE_NUMBER)
+	unwrap(self):WriteULong(x)
+end
+
 --- Writes a short and advances the file position
 -- @param number x The short to write
 function file_methods:writeShort(x)
 	checkluatype (x, TYPE_NUMBER)
 	unwrap(self):WriteShort(x)
+end
+
+--- Writes an unsigned short and advances the file position
+-- @param number x The unsigned short to write
+function file_methods:writeUShort(x)
+	checkluatype (x, TYPE_NUMBER)
+	unwrap(self):WriteUShort(x)
+end
+
+--- Writes an unsigned 64-bit integer and advances the file position
+--- Note: Since Lua cannot store full 64-bit integers, this function takes a string.
+-- @param string x The unsigned 64-bit integer to write
+function file_methods:writeUInt64(x)
+	checkluatype (x, TYPE_STRING)
+	unwrap(self):WriteUInt64(x)
 end
 
 end

@@ -62,7 +62,7 @@ if SERVER then
 	-- @param Player ply Player freezing the entity
 	add("OnPhysgunFreeze")
 
-	--- Called when a player reloads his physgun
+	--- Called when a player reloads their physgun
 	-- @name OnPhysgunReload
 	-- @class hook
 	-- @server
@@ -165,8 +165,15 @@ if SERVER then
 	-- @param boolean teamChat True if team chat
 	-- @return string? New text. "" to stop from displaying. Nil to keep original.
 	add("PlayerSay", nil, nil, returnOnlyOnYourself, true)
+	
+	-- Serverside implementation of playerchat
+	gameevent.Listen("player_say")
+	add("player_say", "playerchat", function(instance, data)
+		local ply = Player(data.userid)
+		return true, {instance.WrapObject(ply), data.text, data.teamonly, not ply:Alive()}
+	end)
 
-	--- Called when a players sprays his logo
+	--- Called when a players sprays their logo
 	-- @name PlayerSpray
 	-- @class hook
 	-- @server
@@ -229,6 +236,31 @@ if SERVER then
 		end
 	end)
 
+	--- Called when an entity is damaged, after EntityTakeDamage is processed.
+	-- @name PostEntityTakeDamage
+	-- @class hook
+	-- @server
+	-- @param Entity target Entity that is hurt
+	-- @param Entity attacker Entity that attacked
+	-- @param Entity inflictor Entity that inflicted the damage
+	-- @param number amount How much damage
+	-- @param number type Type of the damage
+	-- @param Vector position Position of the damage
+	-- @param Vector force Force of the damage
+	-- @param boolean took Whether the entity actually received the damage or not
+	add("PostEntityTakeDamage", nil, function(instance, target, dmg, took)
+		return true, {
+			instance.WrapObject(target),
+			instance.WrapObject(dmg:GetAttacker()),
+			instance.WrapObject(dmg:GetInflictor()),
+			dmg:GetDamage(),
+			dmg:GetDamageType(),
+			instance.Types.Vector.Wrap(dmg:GetDamagePosition()),
+			instance.Types.Vector.Wrap(dmg:GetDamageForce()),
+			took
+		}
+	end)
+
 	--- Called whenever an NPC is killed.
 	-- @name OnNPCKilled
 	-- @class hook
@@ -262,15 +294,18 @@ else
 	-- @client
 	add("FinishChat")
 
-	--- Called when a player's chat message is printed to the chat window
+	--- Called when a chat message is printed your chat window (chip owner only)
 	-- @name PlayerChat
 	-- @class hook
-	-- @client
+	-- @shared
 	-- @param Player ply Player that said the message
 	-- @param string text The message
 	-- @param boolean team Whether the message was team only
 	-- @param boolean isdead Whether the message was send from a dead player
-	add("OnPlayerChat", "playerchat")
+	-- @return boolean Return true to hide the message. Can only be done for the owner of the chip
+	add("OnPlayerChat", "playerchat", nil, function(instance, ret)
+		if ret[1] and instance.player == LocalPlayer() and ret[2] then return true end
+	end)
 
 	--- Called when the player's chat box text changes.
 	-- Requires the 'input' permission.
@@ -313,10 +348,24 @@ else
 	-- @class hook
 	-- @client
 	-- @param Player ply Player who started using voice chat
-	-- @return boolean? Return true to hide CHudVoiceStatus (Voice Chat HUD Element).
+	-- @return boolean? Return true to hide CHudVoiceStatus (Requires a connected HUD).
 	add("PlayerStartVoice", nil, nil, function(instance, args, ply)
 		if args[1] and args[2] == true and SF.IsHUDActive(instance.entity) then
 			return true
+		end
+	end)
+
+	--- Allows modifying the player's mouse sensitivity
+	-- @name AdjustMouseSensitivity
+	-- @class hook
+	-- @client
+	-- @param number defaultSensitivity The base sensitivity
+	-- @param number localFOV The player's current FOV
+	-- @param number defaultFOV The player's default/original FOV
+	-- @return number? Return a number which multiplies the sensitivity. -1 will do nothing but prevent other hooks overriding (Requires a connected HUD).
+	add("AdjustMouseSensitivity", nil, nil, function(instance, args, ply)
+		if args[1] and isnumber(args[2]) and SF.IsHUDActive(instance.entity) then
+			return args[2]
 		end
 	end)
 
@@ -351,6 +400,44 @@ end
 -- @param Player ply Player toggling noclip
 -- @param boolean newState New noclip state. True if on.
 add("PlayerNoClip")
+
+--- Called whenever a player steps
+-- @name PlayerFootstep
+-- @class hook
+-- @shared
+-- @param Player ply The stepping player
+-- @param Vector pos The position of the step
+-- @param number foot Foot that is stepped. 0 for left, 1 for right
+-- @param string sound Sound that is going to play
+-- @param number volume Volume of the footstep
+-- @return boolean? Return true to prevent default step sound (only on chip owner)
+add("PlayerFootstep", nil, function(instance, ply, pos, foot, sound, volume)
+    return true, {
+        instance.WrapObject(ply),
+        instance.Types.Vector.Wrap(pos),
+        foot,
+        sound,
+        volume,
+    }
+end, returnOnlyOnYourself )
+
+--- Called when a player jumps.
+-- @name OnPlayerJump
+-- @class hook
+-- @shared
+-- @param Player ply Player who jumped
+-- @param number speed The velocity/impulse of the jump
+add("OnPlayerJump")
+
+--- Called when a player makes contact with the ground after a jump or a fall.
+-- @name OnPlayerHitGround
+-- @class hook
+-- @shared
+-- @param Player ply Player that hit the ground
+-- @param boolean inWater Did the player land in water?
+-- @param boolean onFloater Did the player land on an object floating in the water?
+-- @param number speed The speed at which the player hit the ground
+add("OnPlayerHitGround")
 
 --- Called when a player presses a key
 -- @name KeyPress
@@ -440,6 +527,7 @@ end)
 -- @class hook
 -- @shared
 -- @param Entity ent Entity being removed
+-- @param boolean fullupdate If clientside, will be true if the entity was removed by a fullupdate
 add("EntityRemoved")
 
 --- Called when an entity is broken
@@ -456,8 +544,28 @@ add("PropBreak")
 -- @shared
 -- @param Entity ent The entity that fired the bullet
 -- @param table data The bullet data. See http://wiki.facepunch.com/gmod/Structures/Bullet
+-- @return function? Optional callback to called as if it were the Bullet structure's Callback. Called before the bullet deals damage with attacker, traceResult.
 add("EntityFireBullets", nil, function(instance, ent, data)
 	return true, { instance.WrapObject(ent), SF.StructWrapper(instance, data, "Bullet") }
+end, function(instance, ret, ent, data)
+	if ret[1] and isfunction(ret[2]) then
+		data.Callback = function(attacker, tr, dmginfo)
+			instance:runFunction(ret[2], instance.WrapObject(attacker), SF.StructWrapper(instance, tr, "TraceResult"))
+		end
+		return true
+	end
+end, true)
+
+--- Called after a bullet is fired and it's trace has been calculated
+-- @name PostEntityFireBullets
+-- @class hook
+-- @shared
+-- @param Entity ent The entity that fired the bullet
+-- @param table data A table containing Trace (See http://wiki.facepunch.com/gmod/Structures/TraceResult) and AmmoType, Tracer, Damage, Force, Attacker, TracerName (see http://wiki.facepunch.com/gmod/Structures/Bullet)
+add("PostEntityFireBullets", nil, function(instance, ent, data)
+	local ret = SF.StructWrapper(instance, data, "Bullet")
+	ret.Trace = SF.StructWrapper(instance, data.Trace, "TraceResult")
+	return true, {instance.WrapObject(ent), ret}
 end)
 
 --- Called whenever a sound has been played. This will not be called clientside if the server played the sound without the client also calling Entity:EmitSound.
@@ -493,10 +601,21 @@ add("EndEntityDriving")
 add("StartEntityDriving")
 
 --- Tick hook. Called each game tick on both the server and client.
--- @name tick
+-- @name Tick
 -- @class hook
 -- @shared
 add("Tick")
+
+--- Called when starfall chip errors
+-- @name StarfallError
+-- @class hook
+-- @shared
+-- @param Entity ent Starfall chip that errored
+-- @param Player|Entity ply Who's fault it errored. World-entity if it was a server error, or player that the script errored if on client
+-- @param string err Error message
+add("StarfallError", nil, function(instance, ent, owner, errply, _, err)
+	return true, {instance.WrapObject(ent), instance.WrapObject(errply), err}
+end)
 
 -- Game Events
 
@@ -604,7 +723,7 @@ end
 
 --- Remote hook.
 -- This hook can be called from other instances
--- @name remote
+-- @name Remote
 -- @class hook
 -- @shared
 -- @param Entity sender The entity that caused the hook to run
@@ -674,7 +793,7 @@ end
 -- Hooks below are not simple gmod hooks and are called by other events in other files.
 
 --- Think hook. Called each frame on the client and each game tick on the server.
--- @name think
+-- @name Think
 -- @class hook
 -- @shared
 
@@ -695,14 +814,6 @@ end
 -- @server
 -- @param Player ply The player that initialized
 
---- Called when starfall chip errors
--- @name StarfallError
--- @class hook
--- @shared
--- @param Entity ent Starfall chip that errored
--- @param Player ply Owner of the chip on server or player that script errored for on client
--- @param string err Error message
-
 --- Called when a component is linked to the starfall
 -- @name ComponentLinked
 -- @class hook
@@ -716,27 +827,27 @@ end
 -- @param Entity ent The component entity
 
 --- Called when the player disconnects from a HUD component linked to the Starfall Chip
--- @name huddisconnected
+-- @name HUDDisconnected
 -- @class hook
 -- @shared
 -- @param Entity ent The hud component entity
 -- @param Player ply The player who disconnected
 
 --- Called when the player connects to a HUD component linked to the Starfall Chip
--- @name hudconnected
+-- @name HUDConnected
 -- @class hook
 -- @shared
 -- @param Entity ent The hud component entity
 -- @param Player ply The player who connected
 
 --- Called when a player uses the screen
--- @name starfallUsed
+-- @name StarfallUsed
 -- @class hook
 -- @param Player activator Player who used the screen or chip
 -- @param Entity used The screen or chip entity that was used
 
 --- Called when a frame is requested to be drawn on screen. (2D/3D Context)
--- @name render
+-- @name Render
 -- @class hook
 -- @client
 

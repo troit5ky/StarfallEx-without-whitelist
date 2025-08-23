@@ -255,7 +255,7 @@ end
 -- @param number pos Position to seek to
 function ss_methods:seek(pos)
 	if pos < 1 then error("Index must be 1 or greater", 2) end
-	self.index = #self+1
+	self.index = #self + 1
 	self.subindex = 1
 
 	local length = 0
@@ -269,7 +269,7 @@ function ss_methods:seek(pos)
 	end
 end
 
---- Move the internal pointer by amount i
+--- Move the internal pointer by amount i. The position will be clamped to [1, buffersize+1]
 -- @param number length The offset
 function ss_methods:skip(length)
 	while length>0 do
@@ -283,7 +283,7 @@ function ss_methods:skip(length)
 				self.subindex = 1
 			end
 		else
-			self.index = #self.index + 1
+			self.index = #self + 1
 			self.subindex = 1
 			break
 		end
@@ -522,7 +522,9 @@ end
 -- @class function
 -- @param Entity e The entity to be written
 local function writeEntity(self, instance, e)
-	self:writeInt16(instance.Types.Entity.GetEntity(e):EntIndex())
+	local ent = instance.Types.Entity.GetEntity(e)
+	self:writeInt16(ent:EntIndex())
+	self:writeInt32(ent:GetCreationID())
 end
 	
 --- Reads an entity from the byte stream and advances the buffer pointer.
@@ -532,9 +534,10 @@ end
 -- @return Entity The entity that was read
 local function readEntity(self, instance, callback)
 	local index = self:readUInt16()
+	local creationindex = self:readUInt32()
 	if callback ~= nil and CLIENT then
 		checkluatype(callback, TYPE_FUNCTION)
-		SF.WaitForEntity(index, function(ent)
+		SF.WaitForEntity(index, creationindex, function(ent)
 			if ent ~= nil then ent = instance.WrapObject(ent) end
 			instance:runFunction(callback, ent)
 		end)
@@ -645,9 +648,9 @@ bit_library.tohex = bit.tohex
 --- Creates a StringStream object
 -- @name bit_library.stringstream
 -- @class function
--- @param string stream String to set the initial buffer to (default "")
--- @param number i The initial buffer pointer (default 1)
--- @param string endian The endianness of number types. "big" or "little" (default "little")
+-- @param string? stream String to set the initial buffer to (default "")
+-- @param number? i The initial buffer pointer (default 1)
+-- @param string? endian The endianness of number types. "big" or "little" (default "little")
 -- @return StringStream StringStream object
 function bit_library.stringstream(stream, i, endian)
 	local ret = SF.StringStream(stream, i, endian)

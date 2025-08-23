@@ -6,7 +6,7 @@ local IsValid = IsValid
 registerprivilege("particleEffect.attach", "Allow users to create particle effect", { client = {}, entities = {} })
 
 local plyCount = SF.LimitObject("particleeffects", "particle effects", 16, "The number of created particle effects via Starfall per client at once")
-SF.ResourceCounters.ParticleEffects = {icon = "icon16/asterisk_orange.png", count = function(ply) return plyCount:get(ply).val end}
+SF.ResourceCounters.ParticleEffects = {icon = "icon16/asterisk_orange.png", count = function(ply) return plyCount:get(ply) end}
 
 --- ParticleEffect library.
 -- @name particleEffect
@@ -24,10 +24,19 @@ SF.RegisterType("ParticleEffect", false, false)
 return function(instance)
 local checkpermission = instance.player ~= SF.Superuser and SF.Permissions.check or function() end
 
+local particleef_library = instance.Libraries.particleEffect
+local particleef_methods = instance.Types.ParticleEffect.Methods
+
+local particle_meta, wrap, unwrap = instance.Types.ParticleEffect, instance.Types.ParticleEffect.Wrap, instance.Types.ParticleEffect.Unwrap
+local ent_meta, ewrap, eunwrap = instance.Types.Entity, instance.Types.Entity.Wrap, instance.Types.Entity.Unwrap
+local vec_meta, vwrap, vunwrap = instance.Types.Vector, instance.Types.Vector.Wrap, instance.Types.Vector.Unwrap
+
 local getent
+local vunwrap1
 local particleEffects = {}
 instance:AddHook("initialize", function()
 	getent = instance.Types.Entity.GetEntity
+	vunwrap1 = vec_meta.QuickUnwrap1
 end)
 
 instance:AddHook("deinitialize", function()
@@ -39,14 +48,6 @@ instance:AddHook("deinitialize", function()
 		plyCount:free(instance.player, 1)
 	end
 end)
-
-local particleef_library = instance.Libraries.particleEffect
-local particleef_methods = instance.Types.ParticleEffect.Methods
-
-local particle_meta, wrap, unwrap = instance.Types.ParticleEffect, instance.Types.ParticleEffect.Wrap, instance.Types.ParticleEffect.Unwrap
-local ent_meta, ewrap, eunwrap = instance.Types.Entity, instance.Types.Entity.Wrap, instance.Types.Entity.Unwrap
-local vec_meta, vwrap, vunwrap = instance.Types.Vector, instance.Types.Vector.Wrap, instance.Types.Vector.Unwrap
-
 
 local function badParticle(flags) -- implemented for future use in case anything is found to be unfriendly.
 	return false
@@ -124,8 +125,11 @@ end
 function particleef_methods:destroy()
 	local uw = unwrap(self)
 
-	if (uw and uw:IsValid()) then
-		uw:StopEmissionAndDestroyImmediately()
+	if uw and particleEffects[uw] then
+		if uw:IsValid() then
+			uw:StopEmissionAndDestroyImmediately()
+		end
+		particleEffects[uw] = nil
 		plyCount:free(instance.player, 1)
 	end
 end
@@ -160,7 +164,7 @@ function particleef_methods:setSortOrigin(origin)
 
 	checkValid(uw)
 
-	uw:SetSortOrgin(vunwrap(origin))
+	uw:SetSortOrgin(vunwrap1(origin))
 end
 
 
@@ -174,7 +178,7 @@ function particleef_methods:setControlPoint(id,value)
 
 	checkValid(uw)
 
-	uw:SetControlPoint(id,vunwrap(value))
+	uw:SetControlPoint(id,vunwrap1(value))
 end
 
 
@@ -203,7 +207,7 @@ function particleef_methods:setForwardVector(id,value)
 
 	checkValid(uw)
 
-	uw:SetControlPointForwardVector(id,vunwrap(value))
+	uw:SetControlPointForwardVector(id,vunwrap1(value))
 end
 
 --- Sets the right direction for given control point.
@@ -216,7 +220,7 @@ function particleef_methods:setRightVector(id,value)
 
 	checkValid(uw)
 
-	uw:SetControlPointRightVector(id,vunwrap(value))
+	uw:SetControlPointRightVector(id,vunwrap1(value))
 end
 
 
@@ -230,7 +234,7 @@ function particleef_methods:setUpVector(id,value)
 
 	checkValid(uw)
 
-	uw:SetControlPointUpVector(id,vunwrap(value))
+	uw:SetControlPointUpVector(id,vunwrap1(value))
 
 end
 

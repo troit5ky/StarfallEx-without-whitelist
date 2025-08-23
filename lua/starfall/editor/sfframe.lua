@@ -72,7 +72,6 @@ end
 -- ----------------------------------------------------------------------
 --ConVars
 Editor.SaveTabsVar = CreateClientConVar("sf_editor_savetabs", "1", true, false)
-Editor.NewTabOnOpenVar = CreateClientConVar("sf_editor_new_tab_on_open", "1", true, false)
 Editor.OpenOldTabsVar = CreateClientConVar("sf_editor_openoldtabs", "1", true, false)
 Editor.WorldClickerVar = CreateClientConVar("sf_editor_worldclicker", "0", true, false)
 Editor.LayoutVar = CreateClientConVar("sf_editor_layout", "0", true, false)
@@ -86,19 +85,8 @@ function SF.DefaultCode()
 	elseif file.Exists("starfall/default.lua", "DATA") then
 		return file.Read("starfall/default.lua", "DATA")
 	else
-		local code = [=[--@name
---@author
---@shared
-
---[[
-Starfall Scripting Environment
-
-Github: https://github.com/thegrb93/StarfallEx
-Reference Page: http://thegrb93.github.io/Starfall/
-
-Default Keyboard shortcuts: https://github.com/ajaxorg/ace/wiki/Default-Keyboard-Shortcuts
-]]]=]
-		code = string.gsub(code, "\r", "")
+		local code = file.Read("starfall/starfall_default.lua", "LUA")
+		code = string.gsub(code, "@author", "@author "..string.gsub(LocalPlayer():Nick(), "[^%w%s%p_]", ""))
 		file.Write("starfall/default.txt", code)
 		return code
 	end
@@ -242,13 +230,14 @@ function Editor:LoadEditorSettings()
 end
 
 function Editor:SaveEditorSettings()
-
 	-- Position & Size
-	local w, h = self:GetSize()
-	RunConsoleCommand("sf_editor_size", w .. "_" .. h)
+	if not self.fs then
+		local w, h = self:GetSize()
+		RunConsoleCommand("sf_editor_size", w .. "_" .. h)
 
-	local x, y = self:GetPos()
-	RunConsoleCommand("sf_editor_pos", x .. "_" .. y)
+		local x, y = self:GetPos()
+		RunConsoleCommand("sf_editor_pos", x .. "_" .. y)
+	end
 end
 function Editor:Paint(w, h)
 	draw.RoundedBox(0, 0, 0, w, h, SF.Editor.colors.dark)
@@ -296,7 +285,7 @@ function Editor:OnMousePressed(mousecode)
 		self.p_my = gui.MouseY()
 		self.p_mode = self:GetMode()
 		if self.p_mode == "drag" then
-			if self.GuiClick > CurTime() - 0.2 then
+			if self.GuiClick > CurTime() - 0.4 then
 				self:Fullscreen()
 				self.pressed = false
 				self.GuiClick = 0
@@ -423,9 +412,10 @@ function Editor:AddComponent(panel, x, y, w, h)
 	return panel
 end
 
--- TODO: Fix this function
 local function extractNameFromCode(str)
-	return str:match("@name +([^\r\n]+)")
+	str = string.match(str, "%-%-@name[^\r\n]*")
+	if str==nil then return nil end
+	return string.match(str, "%-%-@name%s+(.+)")
 end
 
 local function getPreferredTitles(Line, code)
@@ -530,15 +520,6 @@ function Editor:SetActiveTabIndex(index)
 	self:SetActiveTab(tab)
 end
 
-local function extractNameFromFilePath(str)
-	local found = str:reverse():find("/", 1, true)
-	if found then
-		return str:Right(found - 1)
-	else
-		return str
-	end
-end
-
 local old
 function Editor:FixTabFadeTime()
 	if old ~= nil then return end -- It's already being fixed
@@ -547,14 +528,13 @@ function Editor:FixTabFadeTime()
 	timer.Simple(old, function() self.C.TabHolder:SetFadeTime(old) old = nil end)
 end
 
-function Editor:CreateTab(chosenfile, forcedTabHandler)
+function Editor:CreateTab(forcedTabHandler)
 	local th = GetTabHandler(forcedTabHandler)
 	local content = vgui.Create(th.ControlName)
 	content.parentpanel = self -- That's going to be Deprecated
 	content.GetTabHandler = function() return th end -- add :GetTabHandler()
 	content.IsSaved = function(self) return (not th.IsEditor) or self:GetCode() == self.savedCode or self:GetCode() == SF.DefaultCode() or self:GetCode() == "" end
-	local sheet = self.C.TabHolder:AddSheet(extractNameFromFilePath(chosenfile), content)
-	content.chosenfile = chosenfile
+	local sheet = self.C.TabHolder:AddSheet("", content)
 	sheet.Tab.content = content -- For easy access
 
 	sheet.Tab.Paint = function(button, w, h)
@@ -694,9 +674,7 @@ function Editor:GetNextAvailableTab()
 end
 
 function Editor:NewTab()
-	local sheet = self:CreateTab("Generic")
-	self:SetActiveTab(sheet.Tab)
-	self:NewScript(true)
+	self:OpenCode(nil, SF.DefaultCode(), nil, true)
 end
 
 function Editor:CloseTab(_tab,dontask)
@@ -730,12 +708,12 @@ function Editor:CloseTab(_tab,dontask)
 			end
 		end
 	end
-	
+
 	if not IsValid(activetab) then return end
-	
+
 	local ed = activetab:GetPanel()
 	if not ed:IsSaved() and not dontask and not ed.IsOnline then
-		
+
 		local popup = self.closePopups[activetab]
 		if not IsValid(popup) then
 			local newPopup = SF.Editor.Query("Unsaved changes!", string.format("Do you want to close <color=255,30,30>%q</color> ?", activetab:GetText()), "Close", function()
@@ -746,12 +724,12 @@ function Editor:CloseTab(_tab,dontask)
 			end)
 			self.closePopups[activetab] = newPopup
 		end
-		
+
 		if IsValid(popup) then
 			popup:Center()
 			popup:MakePopup()
 		end
-		
+
 		return
 	end
 
@@ -1085,13 +1063,6 @@ function Editor:GetSettings()
 	label:SetText("\nOther settings:")
 	label:SizeToContents()
 
-	local NewTabOnOpen = vgui.Create("DCheckBoxLabel")
-	dlist:AddItem(NewTabOnOpen)
-	NewTabOnOpen:SetConVar("sf_editor_new_tab_on_open")
-	NewTabOnOpen:SetText("New tab on open")
-	NewTabOnOpen:SizeToContents()
-	NewTabOnOpen:SetTooltip("Enable/disable loaded files opening in a new tab.\nIf disabled, loaded files will be opened in the current tab.")
-
 	local SaveTabsOnClose = vgui.Create("DCheckBoxLabel")
 	dlist:AddItem(SaveTabsOnClose)
 	SaveTabsOnClose:SetConVar("sf_editor_savetabs")
@@ -1307,7 +1278,7 @@ function Editor:CreateThemesPanel()
 	label:DockMargin(0, 0, 0, 0)
 	label:SetFont("SFTitle")
 	label:SetColor(Color(255,32,32))
-	label:SetText("If your theme doenst work or looks different than it should you can report it by clicking on this text.")
+	label:SetText("If your theme doesn't work or looks different than it should you can report it by clicking on this text.")
 	label:SetWrap(true)
 	label.DoClick = function()
 		gui.OpenURL( "https://github.com/thegrb93/StarfallEx/issues/307" )
@@ -1331,28 +1302,39 @@ function Editor:TranslateValues(panel, x, y)
 	return x, y
 end
 
-function Editor:NewScript(incurrent)
-	if not incurrent and self.NewTabOnOpenVar:GetBool() then
-		self:NewTab()
-	else
-		self:SaveTabs()
-		self:ChosenFile()
-		-- Set title
-		self:GetActiveTab():SetText("Generic")
-		self.C.TabHolder:InvalidateLayout()
+function Editor:OpenCode(path, code, codeOnDisk, forcenewtab, checkFileExists)
+	code = SF.Editor.normalizeCode(code)
 
-		self:SetCode(SF.DefaultCode())
-		self:GetCurrentTabContent().savedCode = self:GetCurrentTabContent():GetCode() -- It may return different line endings etc
+	if path and checkFileExists and file.Exists("starfall/" .. path, "DATA") then
+		if codeOnDisk==nil then codeOnDisk = SF.Editor.normalizeCode(file.Read("starfall/" .. path, "DATA") or "") end
+		if code==codeOnDisk then return end
 	end
+
+	if not forcenewtab then
+		for i = 1, self:GetNumTabs() do
+			if (path==nil or path==self:GetTabContent(i).chosenfile) and self:GetTabContent(i):GetCode() == code then
+				self:SetActiveTab(i)
+				return
+			end
+		end
+	end
+
+	local tab = self:CreateTab().Tab
+	self:SetActiveTab(tab)
+	self:SetCode(code)
+	self:ChosenFile(path, codeOnDisk)
+	self:UpdateTabText(tab)
+
+	self:SaveTabs()
 end
 
 function Editor:InitShutdownHook()
 	-- save code when shutting down
 	hook.Add("ShutDown", "sf_editor_shutdown", function()
-			if Editor.SaveTabsVar:GetBool() then
-				self:SaveTabs()
-			end
-		end)
+		if Editor.SaveTabsVar:GetBool() then
+			self:SaveTabs()
+		end
+	end)
 end
 
 function Editor:SaveTabs()
@@ -1387,34 +1369,26 @@ function Editor:SaveTabs()
 end
 
 function Editor:OpenOldTabs()
-	if not file.Exists("sf_tabs.txt", "DATA") then 	self.TabsLoaded = true; return end
-
 	local tabs = util.JSONToTable(file.Read("sf_tabs.txt") or "")
-	if not tabs or #tabs == 0 then self.TabsLoaded = true; return end
 
-	-- Temporarily remove fade time
-	self:FixTabFadeTime()
+	if istable(tabs) and tabs[1]~=nil then
+		-- Temporarily remove fade time
+		self:FixTabFadeTime()
 
-	local is_first = true
-	for k, v in pairs(tabs) do
-		if not istable(v) then continue end
-		if v.filename then v.filename = "starfall/"..v.filename end
-		if is_first then -- Remove initial tab
-			timer.Simple(0, function()
-				self:CloseTab(1, true)
-				self:SetActiveTabIndex(tabs.selectedTab or 1)
-			end)
-			is_first = false
+		local tabsloaded = false
+		for k, v in pairs(tabs) do
+			if not (istable(v) and isstring(v.code)) then continue end
+			if isstring(v.filename) then v.filename = "starfall/"..v.filename else v.filename=nil end
+			tabsloaded = true
+			self:OpenCode(v.filename, v.code, nil, true)
 		end
-		self:NewTab()
-		self:ChosenFile(v.filename)
-		self:SetCode(v.code)
-		self:UpdateTabText(self:GetActiveTab())
-		self.C.TabHolder:InvalidateLayout()
-
+		if tabsloaded then
+			self:CloseTab(1, true)
+			self:SetActiveTabIndex(tabs.selectedTab or 1)
+		end
 	end
-	self.TabsLoaded = true
 
+	self.TabsLoaded = true
 end
 
 function Editor:Validate(gotoerror)
@@ -1471,9 +1445,12 @@ function Editor:GetChosenFile()
 end
 
 function Editor:ChosenFile(Line, code)
+	if not Line and code then
+		Line = extractNameFromCode(code)
+	end
 	self:GetCurrentTabContent().chosenfile = Line
-	if not code then
-		code = Line and file.Read(Line)
+	if Line and not code then
+		code = file.Read(Line)
 		if code then
 			code = SF.Editor.normalizeCode(code)
 		end
@@ -1508,7 +1485,7 @@ function Editor:OpenTabOnlyOnce(name)
 	if tab then
 		self:SetActiveTabIndex(tab)
 	else
-		local sheet = self:CreateTab("", name)
+		local sheet = self:CreateTab(name)
 		self:SetActiveTab(sheet.Tab)
 	end
 	return self:GetActiveTab()
@@ -1574,48 +1551,24 @@ function Editor:GetCode()
 end
 
 function Editor:Open(Line, code, forcenewtab, checkFileExists)
-	timer.Create("sfautosave", 5, 0, function()
-		self:SaveTabs()
-	end)
-	if self:IsVisible() and not Line and not code then self:Close() end
-	self:SetV(true)
-	if code then
-		if not forcenewtab then
-			local normalizedCode = SF.Editor.normalizeCode(code)
-			for i = 1, self:GetNumTabs() do
-				if self:GetTabContent(i):GetCode() == normalizedCode then
-					self:SetActiveTab(i)
-					return
-				end
-			end
-			if checkFileExists and file.Exists("starfall/" .. Line, "DATA") and file.Read("starfall/" .. Line, "DATA")==code then
-				return
-			end
-		end
-		local title, tabtext = getPreferredTitles(Line, code)
-		local tab
-		if self.NewTabOnOpenVar:GetBool() or forcenewtab then
-			tab = self:CreateTab(tabtext).Tab
-		else
-			tab = self:GetActiveTab()
-			self:UpdateTabText(tab)
-			self.C.TabHolder:InvalidateLayout()
-		end
-		self:SetActiveTab(tab)
+	if Line==nil and code==nil and self:IsVisible() then self:Close() return end
 
-		self:ChosenFile()
-		self:SetCode(code)
-		if Line then self:SubTitle("Editing: " .. Line) end
-		return
+	timer.Create("sfautosave", 5, 0, function() self:SaveTabs() end)
+	self:SetV(true)
+
+	if code then
+		self:OpenCode(Line, code, nil, forcenewtab, checkFileExists)
+	elseif Line then
+		self:LoadFile(Line, forcenewtab)
 	end
-	if Line then self:LoadFile(Line, forcenewtab) return end
+
 	hook.Run("StarfallEditorOpen")
 end
 
-function Editor:SaveFile(Line, close, SaveAs, Func)
+function Editor:SaveFile(path, close, SaveAs, Func)
 	self:ExtractName()
 
-	if not Line or SaveAs or Line == self.Location .. "/" .. ".txt" then
+	if not path or SaveAs or path == self.Location .. "/" .. ".txt" then
 		local str
 		if self.C.Browser.File then
 			str = self.C.Browser.File.FileDir -- Get FileDir
@@ -1639,10 +1592,11 @@ function Editor:SaveFile(Line, close, SaveAs, Func)
 				str = nil
 			end
 		end
-		
+
 		Derma_StringRequestNoBlur("Save to New File", "", (str ~= nil and str .. "/" or "") .. self.savefilefn,
 			function(strTextOut)
-				strTextOut = self.Location .. "/" .. string.gsub(strTextOut, ".", invalid_filename_chars) .. ".txt"
+				strTextOut = self.Location .. "/" .. string.gsub(strTextOut, ".", invalid_filename_chars)
+				if not string.match(strTextOut, "%.txt$") then strTextOut = strTextOut .. ".txt" end
 				local function save()
 					if Func then
 						Func(strTextOut)
@@ -1650,68 +1604,46 @@ function Editor:SaveFile(Line, close, SaveAs, Func)
 						self:SaveFile(strTextOut, close)
 					end
 				end
-				
+
 				if file.Exists(strTextOut, "DATA") then
 					Derma_QueryNoBlur("File " .. strTextOut .. " already exists!", "File exists!", "Override", save, "Cancel")
 				else
 					save()
 				end
 			end)
-			
+
 		return
 	end
 
-	if SF.FileWrite(Line, self:GetCode()) then
+	path = SF.NormalizePath(path)
+	if SF.FileWrite(path, self:GetCode()) then
+		if path=="starfall/cl_url_whitelist.txt" then SF.ReloadUrlWhitelist() end
+
 		local panel = self.C.Val
-		timer.Simple(0, function() panel.SetText(panel, " Saved as " .. Line) end)
+		timer.Simple(0, function() panel.SetText(panel, " Saved as " .. path) end)
 		surface.PlaySound("ambient/water/drip3.wav")
 
-		self:ChosenFile(Line, self:GetCode())
+		self:ChosenFile(path, self:GetCode())
 		self:UpdateTabText(self:GetActiveTab())
 		if close then
 
-			GAMEMODE:AddNotify("Source code saved as " .. Line .. ".", NOTIFY_GENERIC, 7)
+			GAMEMODE:AddNotify("Source code saved as " .. path .. ".", NOTIFY_GENERIC, 7)
 			self:Close()
 		end
 	else
-		SF.AddNotify(LocalPlayer(), "Failed to save " .. Line, "ERROR", 7, "ERROR1")
+		SF.AddNotify(LocalPlayer(), "Failed to save " .. path, "ERROR", 7, "ERROR1")
 	end
 end
 
 function Editor:LoadFile(Line, forcenewtab)
 	if not Line or file.IsDir(Line, "DATA") then return end
 
-	local f = file.Open(Line, "rb", "DATA")
-	if not f then
-		ErrorNoHalt("Erroring opening file: " .. Line)
+	local str = file.Read(Line, "DATA")
+	if str then
+		str = SF.Editor.normalizeCode(str)
+		self:OpenCode(Line, str, str, forcenewtab)
 	else
-		local str = f:Read(f:Size()) or ""
-		f:Close()
-		self:SaveTabs()
-		if not forcenewtab then
-			for i = 1, self:GetNumTabs() do
-				if self:GetTabContent(i).chosenfile == Line then
-					self:SetActiveTab(i)
-					if forcenewtab ~= nil then
-						self:SetCode(str)
-						self:GetCurrentTabContent().savedCode = SF.Editor.normalizeCode(str)
-					end
-					return
-				end
-			end
-		end
-		local title, tabtext = getPreferredTitles(Line, str)
-		local tab
-		if self.NewTabOnOpenVar:GetBool() or forcenewtab then
-			tab = self:CreateTab(tabtext).Tab
-		else
-			tab = self:GetActiveTab()
-		end
-		self:SetActiveTab(tab)
-		self:SetCode(str)
-		self:ChosenFile(Line, self:GetCode())
-		self:UpdateTabText(tab)
-		self.C.TabHolder:InvalidateLayout()
+		SF.AddNotify(LocalPlayer(), "Erroring opening file: " .. Line, "ERROR", 7, "ERROR1")
 	end
 end
 
@@ -1750,7 +1682,7 @@ function Editor:ReloadTab(tabIndex, interactive)
 	local executeReload = function()
 		local fileContent = file.Read(filepath)
 		if fileContent == nil then
-			ErrorNoHalt("Error while reloading, failed to read file: ", filepath)
+			SF.AddNotify(LocalPlayer(), "Error while reloading, failed to read file: "..filepath, "ERROR", 7, "ERROR1")
 			return
 		end
 
@@ -1841,13 +1773,9 @@ function Editor:Close()
 	local activeWep = LocalPlayer():GetActiveWeapon()
 	if activeWep:IsValid() and activeWep:GetClass() == "gmod_tool" and activeWep.Mode == "starfall_processor" then
 		local model = nil
-		local ppdata = {}
-		pcall(SF.Preprocessor.ParseDirectives, "file", self:GetCode(), ppdata)
-		if ppdata.models and ppdata.models.file ~= "" then
-			model = ppdata.models.file
-		end
-
-		RunConsoleCommand("starfall_processor_ScriptModel", model or "")
+		local ppdata = SF.PreprocessData("", self:GetCode())
+		pcall(ppdata.Preprocess, ppdata)
+		RunConsoleCommand("starfall_processor_ScriptModel", ppdata.model or "")
 	end
 	hook.Run("StarfallEditorClose")
 end
@@ -1869,7 +1797,7 @@ function Editor:Setup(nTitle, nLocation, nEditorType)
 		else
 			local th = GetTabHandler("helper")
 			if th.htmldata then
-				local sheet = self:CreateTab("", "helper")
+				local sheet = self:CreateTab("helper")
 				self:SetActiveTab(sheet.Tab)
 				if Editor.StartHelperUndocked:GetBool() then
 					sheet.Tab.content:Undock()
@@ -1909,9 +1837,9 @@ function Editor:Setup(nTitle, nLocation, nEditorType)
 	FontEditor:Dock(RIGHT)
 	FontEditor:SetText("Font Editor")
 	FontEditor.DoClick = function()
-		if self.fontEditor and self.fontEditor:IsValid() then 
+		if self.fontEditor and self.fontEditor:IsValid() then
 			self.fontEditor:MakePopup() -- bring to front
-			return 
+			return
 		end
 
 		self.fontEditor = vgui.Create("StarfallFontPicker")
@@ -2045,13 +1973,7 @@ function PANEL:UpdatePlayers(players)
 			local killserver = vgui.Create("StarfallButton", cpuServer)
 			killserver:SetText("Admin Kill")
 			killserver.DoClick = function()
-				if SF.playerInstances[ply] then
-					for instance, _ in pairs(SF.playerInstances[ply]) do
-						net.Start("starfall_processor_kill")
-						net.WriteEntity(instance.entity)
-						net.SendToServer()
-					end
-				end
+				RunConsoleCommand( "sf_kill", steamid )
 			end
 			killserver:Dock(LEFT)
 		end
@@ -2071,9 +1993,7 @@ function PANEL:UpdatePlayers(players)
 		local killclient = vgui.Create("StarfallButton", cpuClient)
 		killclient:SetText("Kill all")
 		killclient.DoClick = function()
-			for instance, _ in pairs(SF.playerInstances[ply]) do
-				instance:Error({message = "Killed by user", traceback = ""})
-			end
+			RunConsoleCommand( "sf_kill_cl", steamid )
 		end
 		killclient:Dock(LEFT)
 
@@ -2085,8 +2005,8 @@ function PANEL:UpdatePlayers(players)
 
 			local svtotal = 0
 			local cltotal = 0
-			for instance, _ in pairs(SF.playerInstances[ply] or {}) do
-				svtotal = svtotal + instance.entity:GetNWInt("CPUus")
+			for instance, _ in pairs(SF.playerInstances[ply]) do
+				svtotal = svtotal + (instance.entity:IsValid() and instance.entity:GetNWInt("CPUus") or 0)
 				cltotal = cltotal + instance.cpu_average
 			end
 			cpuServerText:SetText(string.format("SV CPU: %3.1f us", svtotal))
@@ -2100,7 +2020,7 @@ end
 function PANEL:CheckPlayersChanged()
 	local players = {}
 	for k, v in pairs(player.GetAll()) do
-		if SF.playerInstances[v] or SF.BlockedUsers:isBlocked(v:SteamID()) then
+		if not table.IsEmpty(SF.playerInstances[v]) or SF.BlockedUsers:isBlocked(v:SteamID()) then
 			players[v] = true
 		end
 	end

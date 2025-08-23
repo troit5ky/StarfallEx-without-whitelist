@@ -1,6 +1,8 @@
 -- Global to all starfalls
 local checkluatype = SF.CheckLuaType
 local registerprivilege = SF.Permissions.registerPrivilege
+local IsValid = FindMetaTable("Entity").IsValid
+local IsWorld = FindMetaTable("Entity").IsWorld
 
 -- Register privileges
 registerprivilege("constraints.weld", "Weld", "Allows the user to weld two entities", { entities = {} })
@@ -60,10 +62,10 @@ function constr_meta:__tostring()
 end
 
 local function check_constr_perms(ent)
-	if ent.Ent1 and not ent.Ent1:IsWorld() then checkpermission(instance, ent.Ent1, "entities.remove", 3) end
-	if ent.Ent2 and not ent.Ent2:IsWorld() then checkpermission(instance, ent.Ent2, "entities.remove", 3) end
-	if ent.Ent3 and not ent.Ent3:IsWorld() then checkpermission(instance, ent.Ent3, "entities.remove", 3) end
-	if ent.Ent4 and not ent.Ent4:IsWorld() then checkpermission(instance, ent.Ent4, "entities.remove", 3) end
+	if ent.Ent1 and not IsWorld(ent.Ent1) then checkpermission(instance, ent.Ent1, "entities.remove", 3) end
+	if ent.Ent2 and not IsWorld(ent.Ent2) then checkpermission(instance, ent.Ent2, "entities.remove", 3) end
+	if ent.Ent3 and not IsWorld(ent.Ent3) then checkpermission(instance, ent.Ent3, "entities.remove", 3) end
+	if ent.Ent4 and not IsWorld(ent.Ent4) then checkpermission(instance, ent.Ent4, "entities.remove", 3) end
 end
 
 --- Removes the constraint
@@ -71,7 +73,7 @@ end
 function constr_methods:remove()
 	local ent = cunwrap(self)
 	check_constr_perms(ent)
-	entList:remove(instance, ent)
+	entList:remove(ent)
 end
 
 --- Removes all constraints created by the calling chip
@@ -88,17 +90,13 @@ function constr_methods:isValid()
 end
 
 local function checkConstraint(e, t)
-	if e then
-		if e:IsValid() then
-			if e:GetMoveType() == MOVETYPE_VPHYSICS then
-				checkpermission(instance, e, t)
-			else
-				SF.Throw("Can only constrain entities with physics", 3)
-			end
-		elseif not e:IsWorld() then
-			SF.Throw("Invalid Entity", 3)
+	if IsValid(e) then
+		if e:GetMoveType() == MOVETYPE_VPHYSICS then
+			checkpermission(instance, e, t)
+		else
+			SF.Throw("Can only constrain entities with physics", 3)
 		end
-	else
+	elseif not IsWorld(e) then
 		SF.Throw("Invalid Entity", 3)
 	end
 end
@@ -319,9 +317,10 @@ function constraint_library.elastic(index, e1, e2, bone1, bone2, v1, v2, const, 
 	if ent then
 		entList:register(instance, ent)
 
-		e1.Elastics[index] = ent
-		e2.Elastics[index] = ent
-		return cwrap(ent)
+		local ret = cwrap(ent)
+		e1.Elastics[index] = ret
+		e2.Elastics[index] = ret
+		return ret
 	end
 end
 
@@ -377,9 +376,10 @@ function constraint_library.rope(index, e1, e2, bone1, bone2, v1, v2, length, ad
 	if ent then
 		entList:register(instance, ent)
 
-		e1.Ropes[index] = ent
-		e2.Ropes[index] = ent
-		return cwrap(ent)
+		local ret = cwrap(ent)
+		e1.Ropes[index] = ret
+		e2.Ropes[index] = ret
+		return ret
 	end
 end
 
@@ -443,7 +443,7 @@ function constraint_library.nocollide(e1, e2, bone1, bone2)
 	checkluatype(bone1, TYPE_NUMBER)
 	checkluatype(bone2, TYPE_NUMBER)
 
-	local ent = constraint.NoCollide(ent1, ent2, bone1, bone2)
+	local ent = constraint.NoCollide(ent1, ent2, bone1, bone2, true)
 	if ent then
 		entList:register(instance, ent)
 		return cwrap(ent)
@@ -493,8 +493,8 @@ function constraint_library.setElasticLength(index, e, length)
 	length = math.max(length, 0)
 
 	if e.Elastics then
-		local con = e.Elastics[index]
-		if (con and con:IsValid()) then
+		local con = cunwrap(e.Elastics[index])
+		if IsValid(con) then
 			con:Fire("SetSpringLength", length, 0)
 		end
 	end
@@ -515,8 +515,8 @@ function constraint_library.setElasticDamping(index, e, damping)
 	damping = math.max(damping, 0)
 
 	if e.Elastics then
-		local con = e.Elastics[index]
-		if (con and con:IsValid()) then
+		local con = cunwrap(e.Elastics[index])
+		if IsValid(con) then
 			con:Fire("SetSpringDamping", damping, 0)
 		end
 	end
@@ -537,8 +537,8 @@ function constraint_library.setElasticConstant(index, e, constant)
 	constant = math.max(constant, 0)
 
 	if e.Elastics then
-		local con = e.Elastics[index]
-		if (con and con:IsValid()) then
+		local con = cunwrap(e.Elastics[index])
+		if IsValid(con) then
 			con:Fire("SetSpringConstant", constant, 0)
 		end
 	end

@@ -3,6 +3,7 @@ include("shared.lua")
 ENT.RenderGroup = RENDERGROUP_BOTH
 
 local render = render
+local IsValid = FindMetaTable("Entity").IsValid
 
 surface.CreateFont("Starfall_ErrorFont", {
 	font = "arial",
@@ -16,6 +17,17 @@ function ENT:Initialize()
 	net.Start("starfall_processor_link")
 		net.WriteUInt(self:EntIndex(), 16)
 	net.SendToServer()
+
+	self.Transform = {
+		lastUpdate = 0,
+		get = function(self)
+			if CurTime()>self.lastUpdate then
+				self.lastUpdate = CurTime()
+				self.matrixinv = self.matrix:GetInverseTR()
+			end
+			return self.matrix, self.matrixinv
+		end
+	}
 
 	local info = self.Monitor_Offsets[self:GetModel()]
 	if not info then
@@ -51,14 +63,14 @@ function ENT:SetScreenMatrix(info)
 	self.Aspect = info.RatioX
 	self.Scale = info.RS
 	self.Origin = info.offset
-	self.Transform = self:GetWorldTransformMatrix() * self.ScreenMatrix
+	self.Transform.matrix = self:GetWorldTransformMatrix() * self.ScreenMatrix
 
 	local w, h = 512 / self.Aspect, 512
 	self.ScreenQuad = {Vector(0,0,0), Vector(w,0,0), Vector(w,h,0), Vector(0,h,0), Color(0, 0, 0, 255)}
 end
 
 function ENT:RenderScreen()
-	if (self.link and self.link:IsValid()) then
+	if IsValid(self.link) then
 		local instance = self.link.instance
 		if instance then
 			if SF.Permissions.hasAccess(instance, nil, "render.screen") then
@@ -81,7 +93,7 @@ function ENT:RenderScreen()
 				local msg = error.message or ""
 				local location = (error.file and error.line) and ("File: " .. error.file .. "\nLine: " .. error.line) or ""
 				msg = msg:sub(1,512)
-				error.markup = markup.Parse("<font=Starfall_ErrorFont><colour=0, 255, 255, 255>Error occurred in Starfall:\n</colour><color=255, 0, 0, 255>"..msg.."\n</color><color=255, 255, 255, 255>"..location.."</color></font>", 512)
+				error.markup = markup.Parse("<font=Starfall_ErrorFont><colour=0, 255, 255, 255>Error occurred in Starfall:\n</colour><color=255, 0, 0, 255>"..markup.Escape(msg).."\n</color><color=255, 255, 255, 255>"..markup.Escape(location).."</color></font>", 512)
 			end
 			surface.SetTexture(0)
 			surface.SetDrawColor(0, 0, 0, 255)
@@ -99,17 +111,16 @@ function ENT:SetBackgroundColor(r, g, b, a)
 	self.ScreenQuad[5] = Color(r, g, b, math.max(a, 1))
 end
 
+local VECTOR_1_1_1 = Vector(1, 1, 1)
 local writez = Material("engine/writez")
 function ENT:DrawTranslucent()
 	self:DrawModel()
 
 	if halo.RenderedEntity() == self then return end
-	
-	local entityMatrix = self:GetWorldTransformMatrix()
 
-	-- Draw screen here
-	local transform = entityMatrix * self.ScreenMatrix
-	self.Transform = transform
+	local transform = self:GetWorldTransformMatrix() * self.ScreenMatrix
+	self.Transform.matrix = transform
+
 	cam.PushModelMatrix(transform)
 		render.ClearStencil()
 		render.SetStencilEnable(true)
@@ -127,6 +138,9 @@ function ENT:DrawTranslucent()
 		render.SetStencilCompareFunction(STENCILCOMPARISONFUNCTION_EQUAL)
 		render.SetStencilTestMask(1)
 
+		local tone = render.GetToneMappingScaleLinear()
+		render.SetToneMappingScaleLinear(VECTOR_1_1_1)
+
 		--Clear it to the clear color and clear depth as well
 		local color = self.ScreenQuad[5]
 		if color.a == 255 then
@@ -141,6 +155,8 @@ function ENT:DrawTranslucent()
 
 		render.PopFilterMag()
 		render.PopFilterMin()
+
+		render.SetToneMappingScaleLinear(tone)
 
 		render.SetStencilEnable(false)
 
@@ -157,7 +173,7 @@ end
 
 ENT.Monitor_Offsets = {
 	["models/cheeze/pcb/pcb4.mdl"] = {
-		Name	=	"pcb4.mdl",
+		Name	=	"PCB 4 (1:1)",
 		RS	=	0.0625,
 		RatioX	=	1,
 		offset	=	Vector(0, 0, 0.5),
@@ -169,7 +185,7 @@ ENT.Monitor_Offsets = {
 		z	=	0.5,
 	},
 	["models/cheeze/pcb/pcb5.mdl"] = {
-		Name	=	"pcb5.mdl",
+		Name	=	"PCB 5 (2:1)",
 		RS	=	0.0625,
 		RatioX	=	0.508,
 		offset	=	Vector(0, -0.5, 0.5),
@@ -181,7 +197,7 @@ ENT.Monitor_Offsets = {
 		z	=	0.5,
 	},
 	["models/cheeze/pcb/pcb6.mdl"] = {
-		Name	=	"pcb6.mdl",
+		Name	=	"PCB 6 (3:2)",
 		RS	=	0.09375,
 		RatioX	=	0.762,
 		offset	=	Vector(8, -0.5, 0.5),
@@ -193,7 +209,7 @@ ENT.Monitor_Offsets = {
 		z	=	0.5,
 	},
 	["models/cheeze/pcb/pcb7.mdl"] = {
-		Name	=	"pcb7.mdl",
+		Name	=	"PCB 7 (1:1)",
 		RS	=	0.125,
 		RatioX	=	1,
 		offset	=	Vector(0, 0, 0.5),
@@ -205,7 +221,7 @@ ENT.Monitor_Offsets = {
 		z	=	0.5,
 	},
 	["models/cheeze/pcb/pcb8.mdl"] = {
-		Name	=	"pcb8.mdl",
+		Name	=	"PCB 8 (3:2)",
 		RS	=	0.125,
 		RatioX	=	0.668,
 		offset	=	Vector(0, 15.885, 0.5),
@@ -217,7 +233,7 @@ ENT.Monitor_Offsets = {
 		z	=	0.5,
 	},
 	["models/cheeze/pcb2/pcb8.mdl"] = {
-		Name	=	"pcb8.mdl",
+		Name	=	"PCB 8 (1:1)",
 		RS	=	0.2475,
 		RatioX	=	0.99,
 		offset	=	Vector(0, 0, 0.3),
@@ -241,7 +257,7 @@ ENT.Monitor_Offsets = {
 		z	=	0.1,
 	},
 	["models/hunter/blocks/cube1x1x1.mdl"] = {
-		Name	=	"Cube 1x1x1",
+		Name	=	"Cube 1 (1:1)",
 		RS	=	0.09,
 		RatioX	=	1,
 		offset	=	Vector(24, 0, 0),
@@ -253,7 +269,7 @@ ENT.Monitor_Offsets = {
 		z	=	24,
 	},
 	["models/hunter/plates/plate05x05.mdl"] = {
-		Name	=	"Panel 0.5x0.5",
+		Name	=	"Panel 0.5 (1:1)",
 		RS	=	0.045,
 		RatioX	=	1,
 		offset	=	Vector(0, 0, 1.7),
@@ -265,7 +281,7 @@ ENT.Monitor_Offsets = {
 		z	=	0,
 	},
 	["models/hunter/plates/plate1x1.mdl"] = {
-		Name	=	"Panel 1x1",
+		Name	=	"Panel 1 (1:1)",
 		RS	=	0.09,
 		RatioX	=	1,
 		offset	=	Vector(0, 0, 2),
@@ -277,7 +293,7 @@ ENT.Monitor_Offsets = {
 		z	=	0,
 	},
 	["models/hunter/plates/plate2x2.mdl"] = {
-		Name	=	"Panel 2x2",
+		Name	=	"Panel 2 (1:1)",
 		RS	=	0.182,
 		RatioX	=	1,
 		offset	=	Vector(0, 0, 2),
@@ -289,7 +305,7 @@ ENT.Monitor_Offsets = {
 		z	=	0,
 	},
 	["models/hunter/plates/plate4x4.mdl"] = {
-		Name	=	"plate4x4.mdl",
+		Name	=	"Panel 4 (1:1)",
 		RS	=	0.3707,
 		RatioX	=	1,
 		offset	=	Vector(0, 0, 2),
@@ -301,7 +317,7 @@ ENT.Monitor_Offsets = {
 		z	=	1.7,
 	},
 	["models/hunter/plates/plate8x8.mdl"] = {
-		Name	=	"plate8x8.mdl",
+		Name	=	"Panel 8 (1:1)",
 		RS	=	0.741,
 		RatioX	=	1,
 		offset	=	Vector(0, 0, 2),
@@ -313,7 +329,7 @@ ENT.Monitor_Offsets = {
 		z	=	1.7,
 	},
 	["models/hunter/plates/plate16x16.mdl"] = {
-		Name	=	"plate16x16.mdl",
+		Name	=	"Panel 16 (1:1)",
 		RS	=	1.482,
 		RatioX	=	1,
 		offset	=	Vector(0, 0, 2),
@@ -325,7 +341,7 @@ ENT.Monitor_Offsets = {
 		z	=	1.7,
 	},
 	["models/hunter/plates/plate24x24.mdl"] = {
-		Name	=	"plate24x24.mdl",
+		Name	=	"Panel 24 (1:1)",
 		RS	=	2.223,
 		RatioX	=	1,
 		offset	=	Vector(0, 0, 2),
@@ -337,7 +353,7 @@ ENT.Monitor_Offsets = {
 		z	=	1.7,
 	},
 	["models/hunter/plates/plate32x32.mdl"] = {
-		Name	=	"plate32x32.mdl",
+		Name	=	"Panel 32 (1:1)",
 		RS	=	2.964,
 		RatioX	=	1,
 		offset	=	Vector(0, 0, 2),
@@ -349,7 +365,7 @@ ENT.Monitor_Offsets = {
 		z	=	1.7,
 	},
 	["models/kobilica/wiremonitorbig.mdl"] = {
-		Name	=	"Monitor Big",
+		Name	=	"Monitor Big (1:1)",
 		RS	=	0.045,
 		RatioX	=	0.991,
 		offset	=	Vector(0.2, 0, 13),
@@ -361,7 +377,7 @@ ENT.Monitor_Offsets = {
 		z	=	0.2,
 	},
 	["models/kobilica/wiremonitorsmall.mdl"] = {
-		Name	=	"Monitor Small",
+		Name	=	"Monitor Small (1:1)",
 		RS	=	0.0175,
 		RatioX	=	1,
 		offset	=	Vector(0.2, 0, 5),
@@ -409,7 +425,7 @@ ENT.Monitor_Offsets = {
 		z	=	6.1,
 	},
 	["models/props_lab/monitor01b.mdl"] = {
-		Name	=	"Small TV",
+		Name	=	"Small TV (1:1)",
 		RS	=	0.0185,
 		RatioX	=	1.0173,
 		offset	=	Vector(6.53, -1, 0.45),
@@ -421,7 +437,7 @@ ENT.Monitor_Offsets = {
 		z	=	6.53,
 	},
 	["models/props_lab/workspace002.mdl"] = {
-		Name	=	"Workspace 002",
+		Name	=	"Workspace (1:1)",
 		RS	=	0.06836,
 		RatioX	=	0.9669,
 		offset	=	Vector(-42.133224, -42.372322, 42.110897),
@@ -433,7 +449,7 @@ ENT.Monitor_Offsets = {
 		z	=	42.1109,
 	},
 	["models/props_mining/billboard001.mdl"] = {
-		Name	=	"TF2 Red billboard",
+		Name	=	"TF2 Red billboard (7:4)",
 		RS	=	0.375,
 		RatioX	=	0.5714,
 		offset	=	Vector(3.5, 0, 96),
@@ -445,7 +461,7 @@ ENT.Monitor_Offsets = {
 		z	=	96,
 	},
 	["models/props_mining/billboard002.mdl"] = {
-		Name	=	"TF2 Red vs Blue billboard",
+		Name	=	"TF2 Red vs Blue billboard (51:16)",
 		RS	=	0.375,
 		RatioX	=	0.3137,
 		offset	=	Vector(3.5, 0, 192),
@@ -455,7 +471,92 @@ ENT.Monitor_Offsets = {
 		y1	=	-96,
 		y2	=	96,
 		z	=	192,
-	}
+	},
+
+	["models/hunter/plates/plate075x1.mdl"] = {
+		Name 	= "Plate (0.75x1)",
+		RS 		= 0.07,
+		RatioX 	= 0.76,
+		offset 	= Vector(-5.9, 0, 1.65),
+		rot		= Angle(0, 90, 180),
+		x1		= -23.5,
+		y1		= -18,
+		x2		= 23.5,
+		y2		= 18,
+		z		= 0.5
+	},
+	["models/hunter/plates/plate2x3.mdl"] = {
+		Name 	= "Plate (2x3)",
+		RS 		= 0.185,
+		RatioX 	= 0.67,
+		offset 	= Vector(0, 0, 1.65),
+		rot		= Angle(0, 90, 180),
+		x1		= -70.5,
+		y1		= -47.5,
+		x2		= 70.5,
+		y2		= 47.5,
+		z		= 0.5
+	},
+	["models/hunter/plates/plate3x5.mdl"] = {
+		Name	= "Plate (3x5)",
+		RS 		= 0.277,
+		RatioX 	= 0.598,
+		offset 	= Vector(0, 0, 1.65),
+		rot		= Angle(0, 90, 180),
+		x1		= -118.5,
+		y1		= -71,
+		x2		= 118.5,
+		y2		= 71,
+		z		= 0.5
+	},
+	["models/hunter/plates/plate4x6.mdl"] = {
+		Name 	= "Plate (4x6)",
+		RS 		= 0.37,
+		RatioX 	= 0.666,
+		offset 	= Vector(0, 0, 1.65),
+		rot		= Angle(0, 90, 180),
+		x1		= -142,
+		y1		= -94.5,
+		x2		= 142,
+		y2		= 94.5,
+		z		= 0.5
+	},
+	["models/hunter/plates/plate5x8.mdl"] = {
+		Name 	= "Plate (5x8)",
+		RS 		= 0.463,
+		RatioX 	= 0.626,
+		offset 	= Vector(0, 0, 1.65),
+		rot		= Angle(0, 90, 180),
+		x1		= -189,
+		y1		= -118.3,
+		x2		= 189,
+		y2		= 118.3,
+		z		= 0.5
+	},
+	["models/hunter/plates/plate6x8.mdl"] = {
+		Name 	= "Plate (6x8)",
+		RS 		= 0.555,
+		RatioX 	= 0.75,
+		offset 	= Vector(0, 0, 1.65),
+		rot		= Angle(0, 90, 180),
+		x1		= -189.3,
+		y1		= -142,
+		x2		= 189.3,
+		y2		= 142,
+		z		= 0.5
+	},
+	["models/hunter/plates/plate16x24.mdl"] = {
+		Name 	= "Plate (16x24)",
+		RS 		= 1.482,
+		RatioX 	= 0.666,
+		offset 	= Vector(0, 0, 2),
+		rot		= Angle(0, 90, 180),
+		x1		= -569.5,
+		y1		= -379,
+		x2		= 569.5,
+		y2		= 379,
+		z		= 0.5
+	},
 }
 
 SF.CustomScreenInfo = {
