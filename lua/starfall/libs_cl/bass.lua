@@ -294,6 +294,12 @@ function bass_methods:setPitch(pitch)
 	getsnd(self):SetPlaybackRate(math.Clamp(pitch, 0, 100))
 end
 
+--- Gets the pitch of the sound.
+-- @return number The current pitch of the sound.
+function bass_methods:getPitch()
+	return getsnd(self):GetPlaybackRate()
+end
+
 --- Sets the position of the sound in 3D space. Must have `3d` flag for this to have any effect.
 -- @param Vector pos Where to position the sound.
 function bass_methods:setPos(pos)
@@ -366,6 +372,12 @@ function bass_methods:getTime()
 	return getsnd(self):GetTime()
 end
 
+--- Returns the filename for the sound channel.
+-- @return string The file name. This will not be always what you have put into the Bass:loadURL() as first argument.
+function bass_methods:getFileName()
+	return getsnd(self):GetFileName()
+end
+
 --- Perform fast Fourier transform algorithm to compute the DFT of the sound.
 -- @param number n Number of consecutive audio samples, between 0 and 7. Depending on this parameter you will get 256*2^n samples.
 -- @return table Table containing DFT magnitudes, each between 0 and 1.
@@ -373,6 +385,14 @@ function bass_methods:getFFT(n)
 	local arr = {}
 	getsnd(self):FFT(arr, n)
 	return arr
+end
+
+--- Returns whether the audio stream is block streamed or not.
+-- @return boolean Is the audio stream block streamed or not.
+function bass_methods:isBlockStreamed()
+	local uw = getsnd(self)
+	if not uw:IsOnline() then SF.Throw("The Bass Object isn't playing an online audio stream!", 2) end
+	return uw:IsBlockStreamed()
 end
 
 --- Gets whether the sound is streamed online.
@@ -401,14 +421,13 @@ function bass_methods:getPan()
 end
 
 --- Sets the relative volume of the left and right channels.
--- @param number Relative integer volume between the left and right channels. Values must be -1 to 1 for relative left to right.
+-- @param number pan Relative integer volume between the left and right channels. Values must be -1 to 1 for relative left to right.
 function bass_methods:setPan(pan)
 	checkluatype(pan, TYPE_NUMBER)
 
 	local uw = getsnd(self)
-	-- If we ever use / add Set3DEnabled to SF, remember to change this Is3D to Get3DEnabled.
 	if uw:Is3D() then SF.Throw("You cannot set the pan of a 3D Bass Object!", 2) end
-	uw:SetPan( pan )
+	uw:SetPan(pan)
 end
 
 --- Retrieves the number of bits per sample of the sound.
@@ -422,6 +441,72 @@ end
 -- @return number The average bit rate of the sound.
 function bass_methods:getAverageBitRate()
 	return getsnd(self):GetAverageBitRate()
+end
+
+--- Returns the buffered time of the sound channel in seconds, for online streaming sound channels (Bass:loadURL()). For offline channels this will be equivalent to Bass:getLength().
+-- @return number The current buffered time of the stream, in seconds.
+function bass_methods:getBufferedTime()
+	local uw = getsnd(self)
+	if uw:IsOnline() then
+		return uw:GetBufferedTime()
+	else return uw:GetLength() end
+end
+
+--- Returns the sample rate for currently playing sound.
+-- @return number The sample rate in Hz. This should always be 44100.
+function bass_methods:getSamplingRate()
+	return getsnd(self):GetSamplingRate()
+end
+
+--- Retrieves HTTP headers from a bass stream channel created by Bass:loadURL(), if available.
+--- Of special interest here are headers such as icy-name, icy-br, ice-audio-info, icy-genre.
+--- CRITICAL NOTE: Tags aren't available immediately! Must use a timer to wait 100-500ms for BASS to parse metadata during stream init!!
+-- @return table A list of HTTP headers or nil if no information is available.
+function bass_methods:getTagsHTTP()
+	return getsnd(self):GetTagsHTTP()
+end
+
+--- Retrieves the ID3 version 1 info from a bass channel created by Bass:loadFile or Bass:loadURL, if available. ID3v2 is not supported.
+--- CRITICAL NOTE: Tags aren't available immediately! Must use a timer to wait 100-500ms for BASS to parse metadata during stream init!!
+-- @return table A table containing the information, or nil if no information is available.
+-- (The table will always have the following keys, filled out based on what is available: "album", "artist", "comment", "genre", "id", "title", "year")
+function bass_methods:getTagsID3()
+	return getsnd(self):GetTagsID3()
+end
+
+--- Retrieves ICY metadata from a bass stream channel created by Bass:loadURL, if available.
+--- CRITICAL NOTE: Tags aren't available immediately! Must use a timer to wait 100-500ms for BASS to parse metadata during stream init!!
+-- @return string The meta information, or nil if no information is available.
+function bass_methods:getTagsMeta()
+	return getsnd(self):GetTagsMeta()
+end
+
+--- Retrieves .m4a media info, from a bass channel created by Bass:loadFile or Bass:loadURL, if available.
+--- CRITICAL NOTE: Tags aren't available immediately! Must use a timer to wait 100-500ms for BASS to parse metadata during stream init!!
+-- @return table A list of available information in no particular order, or nil if no information is available.
+function bass_methods:getTagsMP4()
+	return getsnd(self):GetTagsMP4()
+end
+
+--- Retrieves OGG media info tag, from a bass channel created by Bass:loadFile or Bass:loadURL, if available.
+--- CRITICAL NOTE: Tags aren't available immediately! Must use a timer to wait 100-500ms for BASS to parse metadata during stream init!!
+-- @return table A list of available information in no particular order, or nil if no information is available. 
+function bass_methods:getTagsOGG()
+	return getsnd(self):GetTagsOGG()
+end
+
+--- Retrieves OGG Vendor tag, usually containing the application that created the file, from a bass channel created by Bass:loadFile or Bass:loadURL, if available.
+--- CRITICAL NOTE: Tags aren't available immediately! Must use a timer to wait 100-500ms for BASS to parse metadata during stream init!!
+-- @return string The OGG vendor tag, or nil if no information is available.
+function bass_methods:getTagsVendor()
+	return getsnd(self):GetTagsVendor()
+end
+
+--- Retrieves .WMA media info, from a bass channel created by Bass:loadFile or Bass:loadURL, if available.
+--- CRITICAL NOTE: Tags aren't available immediately! Must use a timer to wait 100-500ms for BASS to parse metadata during stream init!!
+-- @return table A list of available information in no particular order, or nil if no information is available.
+function bass_methods:getTagsWMA()
+	return getsnd(self):GetTagsWMA()
 end
 
 --- Returns the flags used to create the sound.
@@ -440,6 +525,18 @@ end
 -- @return boolean True if the sound is 3D.
 function bass_methods:is3D()
 	return getsnd(self):Is3D()
+end
+
+---------------------------------------------------------------------------------------------------
+-- NOTE: Do not add set3DEnabled to SF;
+--       it would only enable exploiting the 3D->2D mode (and break spatial audio).
+--       By creating a '3d' Bass object and then calling `Bass:set3DEnabled(false)` in the callback
+---------------------------------------------------------------------------------------------------
+
+--- Determines whether the sound channel is currently in 3D mode.
+-- @return boolean Whether the sound channel is currently in 3D mode.
+function bass_methods:get3DEnabled()
+	return getsnd(self):Get3DEnabled()
 end
 
 --- Returns the state of the sound.
@@ -471,6 +568,28 @@ end
 -- @return boolean True if the sound is stalled.
 function bass_methods:isStalled()
 	return getsnd(self):GetState() == GMOD_CHANNEL_STALLED
+end
+
+--- Sets 3D cone of the sound channel.
+-- @param number innerAngle The angle of the inside projection cone in degrees. Range is from 0 (no cone) to 360 (sphere), -1 = leave current.
+-- @param number outerAngle The angle of the outside projection cone in degrees. Range is from 0 (no cone) to 360 (sphere), -1 = leave current.
+-- @param number outerVolume The delta-volume outside the outer projection cone. Range is from 0 (silent) to 1 (same as inside the cone), less than 0 = leave current.
+function bass_methods:set3DCone(innerAngle, outerAngle, outerVolume)
+	checkluatype(innerAngle, TYPE_NUMBER)
+	checkluatype(outerAngle, TYPE_NUMBER)
+	checkluatype(outerVolume, TYPE_NUMBER)
+
+	local uw = getsnd(self)
+	if not uw:Is3D() then SF.Throw("You cannot set the cone of a Bass Object that isn't 3D!", 2) end
+	uw:Set3DCone(innerAngle, outerAngle, outerVolume)
+end
+
+--- Returns 3D cone of the sound channel.
+-- @return number The angle of the inside projection cone in degrees.
+-- @return number The angle of the outside projection cone in degrees.
+-- @return number The delta-volume outside the outer projection cone.
+function bass_methods:get3DCone()
+	return getsnd(self):Get3DCone()
 end
 
 end

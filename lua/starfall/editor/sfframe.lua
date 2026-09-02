@@ -79,21 +79,34 @@ Editor.StartHelperUndocked = CreateClientConVar("sf_helper_startundocked", "0", 
 Editor.EditorFileAutoReload = CreateClientConVar("sf_editor_file_auto_reload", "0", true, false, "Controls the auto reload functionality of Starfall's Editor")
 Editor.EditorFileAutoReloadInterval = CreateClientConVar("sf_editor_file_auto_reload_interval", "1", true, false, "Controls the polling interval of the auto reload functionality of Starfall's Editor")
 
+local defaultCode = [=[--@name Untitled
+--@author
+--@shared
+
+--[[
+Starfall Scripting Environment
+
+StarfallEx Addon: https://github.com/thegrb93/StarfallEx
+Documentation: http://thegrb93.github.io/StarfallEx
+
+This default code can be edited via the 'default.txt' file
+]]
+]=]
+
 function SF.DefaultCode()
 	if file.Exists("starfall/default.txt", "DATA") then
 		return file.Read("starfall/default.txt", "DATA")
 	elseif file.Exists("starfall/default.lua", "DATA") then
 		return file.Read("starfall/default.lua", "DATA")
 	else
-		local code = file.Read("starfall/starfall_default.lua", "LUA")
-		code = string.gsub(code, "@author", "@author "..string.gsub(LocalPlayer():Nick(), "[^%w%s%p_]", ""))
+		local code = string.gsub(defaultCode, "@author", "@author "..string.gsub(LocalPlayer():Nick(), "[^%w%s%p_]", ""))
 		file.Write("starfall/default.txt", code)
 		return code
 	end
 end
 
 cvars.AddChangeCallback("sf_editor_layout", function()
-	RunConsoleCommand("sf_editor_restart")
+	timer.Simple(0, function() RunConsoleCommand("sf_editor_restart") end)
 end)
 
 Editor.CreatedFonts = {}
@@ -163,11 +176,8 @@ function Editor:Init()
 	self.Components = {}
 
 	-- Controls the auto reload functionality
-	self.autoReloadEnabled = Editor.EditorFileAutoReload:GetBool()
-	self.autoReloadInterval = Editor.EditorFileAutoReloadInterval:GetFloat()
-	cvars.AddChangeCallback(Editor.EditorFileAutoReload:GetName(), function() self:setFileAutoReload(Editor.EditorFileAutoReload:GetBool()) end)
-	cvars.AddChangeCallback(Editor.EditorFileAutoReloadInterval:GetName(), function() self:setFileAutoReloadInterval(Editor.EditorFileAutoReloadInterval:GetFloat()) end)
-
+	SF.CvarCallback(Editor.EditorFileAutoReloadInterval, function(val) self:setFileAutoReloadInterval(val) end, "number")
+	SF.CvarCallback(Editor.EditorFileAutoReload, function(val) self:setFileAutoReload(val) end, "boolean")
 
 	-- Load border colors, position, & size
 	self:LoadEditorSettings()
@@ -191,11 +201,6 @@ function Editor:Init()
 	self:SetV(false)
 
 	self:InitShutdownHook()
-
-	-- This should create the timers
-	if self.EditorFileAutoReload then
-		self:setFileAutoReload(true)
-	end
 end
 
 local size = CreateClientConVar("sf_editor_size", "800_600", true, false)
@@ -443,7 +448,12 @@ function Editor:GetLastTab() return self.LastTab end
 
 function Editor:SetLastTab(Tab) self.LastTab = Tab end
 
-function Editor:GetActiveTab() return self.C.TabHolder:GetActiveTab() end
+function Editor:GetActiveTab()
+	local tab = self.C.TabHolder:GetActiveTab()
+	if tab then return tab end
+	self:CreateTab()
+	return self.C.TabHolder:GetActiveTab()
+end
 
 function Editor:GetNumTabs() return #self.C.TabHolder.Items end
 
@@ -864,7 +874,7 @@ function Editor:InitComponents()
 
 	self.C.Menu:Dock(TOP)
 	self.C.TabHolder:Dock(FILL)
-	self.C.TabHolder.tabScroller:DockMargin(0, 0, 3, 0) -- We dont want default offset
+	self.C.TabHolder.tabScroller:DockMargin(0, 0, 3, 0) -- We don't want default offset
 	self.C.TabHolder.tabScroller:SetOverlap(-1)
 	self.C.TabHolder:SetPadding(0)
 	self.C.Menu.Paint = function(_, w, h)
@@ -1117,7 +1127,7 @@ function Editor:GetSettings()
 	AddCategory(themesPanel, "Themes", "icon16/page_white_paintbrush.png", "Theme settings.")
 
 	----- Tab settings
-	for k, v in pairs(SF.Editor.TabHandlers) do -- We let TabHandlers register their settings but only if they are current editor or arent editor at all
+	for k, v in pairs(SF.Editor.TabHandlers) do -- We let TabHandlers register their settings but only if they are current editor or aren't editor at all
 		if v.RegisterSettings and (not v.IsEditor or (v.IsEditor and SF.Editor.CurrentTabHandler:GetString() == k)) then
 			AddCategory(v:RegisterSettings())
 		end
@@ -1195,7 +1205,7 @@ function Editor:CreateThemesPanel()
 					local parsed, strId, error = SF.Editor.Themes.ParseTextMate(body)
 
 					if not parsed then
-						Derma_Message("A problem occured during parsing the XML file: " .. error, "SF Themes", "Close")
+						Derma_Message("A problem occurred during parsing the XML file: " .. error, "SF Themes", "Close")
 						return
 					end
 
@@ -1216,7 +1226,7 @@ function Editor:CreateThemesPanel()
 				local parsed, strId, error = SF.Editor.Themes.ParseTextMate(text)
 
 				if not parsed then
-					Derma_Message("A problem occured during parsing the XML file: " .. error, "SF Themes", "Close")
+					Derma_Message("A problem occurred during parsing the XML file: " .. error, "SF Themes", "Close")
 					return
 				end
 
@@ -1398,16 +1408,19 @@ function Editor:Validate(gotoerror)
 	end
 
 	local code = self:GetCode()
-	if #code < 1 then return true end -- We wont validate empty scripts
-	local err = SF.CompileString(code , "Validation", false)
+	if #code < 1 then return true end -- We won't validate empty scripts
+	local ok, err = pcall(function()
+		SF.PreprocessData("Validation", code):Preprocess()
+	end)
+	if ok then err = SF.CompileString(code, "Validation", false) end
 	local success = not isstring(err)
 	local row, message
 	if success then
 		self:SetValidatorStatus("Validation successful!", 0, 110, 20, 255)
 	else
-		row = tonumber(err:match("%d+")) or 0
-		message = err:match(": .+$")
-		message = message and message:sub(3) or "Unknown"
+		row, message = err:match(":(%d+)[,:] (.+)$")
+		row = tonumber(row) or 0
+		message = message or "Unknown"
 		message = "Line "..row..":"..message
 		self.C.Val:SetBGColor(110, 0, 20, 255)
 		self.C.Val:SetText(" " .. message)
@@ -1643,7 +1656,7 @@ function Editor:LoadFile(Line, forcenewtab)
 		str = SF.Editor.normalizeCode(str)
 		self:OpenCode(Line, str, str, forcenewtab)
 	else
-		SF.AddNotify(LocalPlayer(), "Erroring opening file: " .. Line, "ERROR", 7, "ERROR1")
+		SF.AddNotify(LocalPlayer(), "Error opening file: " .. Line, "ERROR", 7, "ERROR1")
 	end
 end
 
@@ -1656,7 +1669,7 @@ end
 ---Reloads the tab associated to the file at `filepath`, if there is one.
 ---@param tabIndex number The index of the tab to reload
 ---@param interactive boolean If the file has unsaved changed and interactive is true
----then prompt the user to overwrite the current unsaved changes, otherwise dont reload the file.
+---then prompt the user to overwrite the current unsaved changes, otherwise don't reload the file.
 function Editor:ReloadTab(tabIndex, interactive)
 	local activeTabIndex = self:GetActiveTabIndex()
 	local tab = self:GetTab(tabIndex)
@@ -1743,7 +1756,9 @@ function Editor:setFileAutoReload(enabled)
 	self.autoReloadEnabled = enabled
 	if enabled then
 		timer.Create(Editor.EditorFileAutoReload:GetName(), self.autoReloadInterval, 0, function(_, _, newValue)
-			self:ReloadTabs(false)
+			if IsValid(self) then
+				self:ReloadTabs(false)
+			end
 		end)
 	else
 		timer.Remove(Editor.EditorFileAutoReload:GetName())
@@ -1862,7 +1877,7 @@ end
 vgui.Register("StarfallEditorFrame", Editor, "DFrame")
 
 -- Starfall Users
-PANEL  = {}
+local PANEL = {}
 
 function PANEL:UpdatePlayers(players)
 	local sortedplayers = {}
@@ -1884,7 +1899,7 @@ function PANEL:UpdatePlayers(players)
 		header:SetBackgroundColor(Color(0,0,0,20))
 		header:SetTooltip(tbl.name)
 
-		local blocked = SF.BlockedUsers:isBlocked(steamid)
+		local blocked = SF.BlockedUsers:contains(steamid)
 		local button = vgui.Create("StarfallButton", header)
 		button.active = blocked
 		button:SetText(blocked and "Unblock" or "Block")
@@ -1893,9 +1908,9 @@ function PANEL:UpdatePlayers(players)
 
 		button.DoClick = function()
 			if blocked then
-				SF.BlockedUsers:unblock(steamid)
+				SF.BlockedUsers:remove(steamid)
 			else
-				SF.BlockedUsers:block(steamid)
+				SF.BlockedUsers:add(steamid)
 			end
 			blocked = not blocked
 			button:SetText(blocked and "Unblock" or "Block")
@@ -2006,8 +2021,8 @@ function PANEL:UpdatePlayers(players)
 			local svtotal = 0
 			local cltotal = 0
 			for instance, _ in pairs(SF.playerInstances[ply]) do
-				svtotal = svtotal + (instance.entity:IsValid() and instance.entity:GetNWInt("CPUus") or 0)
-				cltotal = cltotal + instance.cpu_average
+				svtotal = svtotal + (instance.entity:IsValid() and instance.entity:GetCPUus("CPUus") or 0)
+				cltotal = cltotal + instance.perf.cpuAverage
 			end
 			cpuServerText:SetText(string.format("SV CPU: %3.1f us", svtotal))
 			cpuClientText:SetText(string.format("CL CPU: %3.1f us", cltotal*1e6))
@@ -2020,7 +2035,7 @@ end
 function PANEL:CheckPlayersChanged()
 	local players = {}
 	for k, v in pairs(player.GetAll()) do
-		if not table.IsEmpty(SF.playerInstances[v]) or SF.BlockedUsers:isBlocked(v:SteamID()) then
+		if not table.IsEmpty(SF.playerInstances[v]) or SF.BlockedUsers:contains(v:SteamID()) then
 			players[v] = true
 		end
 	end

@@ -4,6 +4,7 @@ local registerprivilege = SF.Permissions.registerPrivilege
 
 -- Register Privileges
 registerprivilege("sound.create", "Sound", "Allows the user to create sounds", { client = {} })
+registerprivilege("sound.emitSound", "Sound", "Allows the user to emit detached sounds", { client = {} })
 
 local plyCount = SF.LimitObject("sounds", "sounds", 20, "The number of sounds allowed to be playing via Starfall client at once")
 local plySoundBurst = SF.BurstObject("sounds", "sounds", 10, 5, "The rate at which the burst regenerates per second.", "The number of sounds allowed to be made in a short interval of time via Starfall scripts for a single instance ( burst )")
@@ -56,11 +57,6 @@ local function destroySound(sound)
 	end
 end
 
-local getent
-instance:AddHook("initialize", function()
-	getent = instance.Types.Entity.GetEntity
-end)
-
 instance:AddHook("deinitialize", function()
 	for s in pairs(sounds) do
 		destroySound(s)
@@ -79,7 +75,7 @@ function sound_library.create(ent, path, nofilter)
 
 	checkpermission(instance, { ent, path }, "sound.create")
 
-	local e = getent(ent)
+	local e = eunwrap(ent)
 
 	plySoundBurst:use(instance.player, 1)
 	plyCount:use(instance.player, 1)

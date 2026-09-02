@@ -72,6 +72,8 @@ TabHandler.EnlightenColorsConVar = CreateClientConVar("sf_editor_wire_enlightenc
 TabHandler.HighlightOnDoubleClickConVar = CreateClientConVar("sf_editor_wire_highlight_on_double_click", "1", true, false)
 TabHandler.DisplayCaretPosConVar = CreateClientConVar("sf_editor_wire_display_caret_pos", "0", true, false)
 TabHandler.AutoIndentConVar = CreateClientConVar("sf_editor_wire_auto_indent", "1", true, false)
+TabHandler.ExpandTabsConVar = CreateClientConVar("sf_editor_wire_expand_tabs", "1", true, false)
+TabHandler.TabSizeConVar = CreateClientConVar("sf_editor_wire_tab_size", "4", true, false)
 TabHandler.EnableAntialiasing = CreateClientConVar("sf_editor_wire_enable_antialiasing", "1", true, false)
 TabHandler.ScrollSpeedConVar = CreateClientConVar("sf_editor_wire_scrollmultiplier", "4", true, false)
 TabHandler.LinesHiddenFormatConVar = CreateClientConVar("sf_editor_wire_lines_hidden_format", "< %d lines hidden >", true, false)
@@ -82,11 +84,6 @@ TabHandler.HtmlBackgroundOpacityConvar = CreateClientConVar("sf_editor_wire_html
 TabHandler.ACControlStyle = CreateClientConVar( "sf_editor_wire_ac_controlstyle", "2", true, false )
 TabHandler.ACAuto = CreateClientConVar( "sf_editor_wire_ac_auto", "1", true, false )
 TabHandler.ACWithParams = CreateClientConVar( "sf_editor_wire_ac_withparams", "1", true, false )
-
-cvars.AddChangeCallback("sf_editor_wire_htmlbackground",function(_,_,url)
-	TabHandler:UpdateHtmlBackground()
-end)
-
 
 
 ---------------------
@@ -162,16 +159,15 @@ local function createWireLibraryMap()
 end
 
 function TabHandler:Init()
-	TabHandler.LibMap = createWireLibraryMap()
-
-	TabHandler.Modes.Starfall = include("starfall/editor/syntaxmodes/starfall.lua")
+	self.LibMap = createWireLibraryMap()
+	self.Modes.Starfall = include("starfall/editor/syntaxmodes/starfall.lua")
 	colors = SF.Editor.Themes.CurrentTheme
 	self:LoadSyntaxColors()
-	self:UpdateHtmlBackground()
+	SF.CvarCallback(self.HtmlBackgroundConvar, function(val) self:UpdateHtmlBackground(val) end, "string")
 end
+TabHandler.DocsFinished = TabHandler.Init
 
-function TabHandler:UpdateHtmlBackground()
-	local url = self.HtmlBackgroundConvar:GetString()
+function TabHandler:UpdateHtmlBackground(url)
 	if url=="" then self.HtmlBackground = false return end
 	self.HtmlBackground = true
 
@@ -234,7 +230,7 @@ function TabHandler:RegisterSettings()
 	if system.IsLinux() then
 		local label = vgui.Create("DLabel")
 		label:SetWrap(true)
-		label:SetText("Warning: You are running linux, you should make sure font is installed in your system or you wont be able to see it!")
+		label:SetText("Warning: You are running linux, you should make sure font is installed in your system or you won't be able to see it!")
 		label:SetPos(10, 0)
 		form:AddItem(label)
 	end
@@ -295,6 +291,16 @@ function TabHandler:RegisterSettings()
 	commentStyle:AddChoice("Each Line", 2)
 
 	local autoIndent = form:CheckBox( "Auto indent", "sf_editor_wire_auto_indent" )
+	local expandTabs = form:CheckBox( "Expand tabs to spaces", "sf_editor_wire_expand_tabs" )
+
+	local tabSize = form:ComboBox( "Tab size" )
+	tabSize.OnSelect = function(_, _, value)
+		RunConsoleCommand("sf_editor_wire_tab_size", value)
+	end
+	for i = 1, 8 do
+		tabSize:AddChoice(i)
+	end
+	tabSize:SetValue(string.format("%.0f", TabHandler.TabSizeConVar:GetInt()))
 
 	local autoValidate = form:CheckBox( "Automatically validate", "sf_editor_wire_validateontextchange" )
 
@@ -315,8 +321,8 @@ function TabHandler:RegisterSettings()
 	local modes = {
 		{ "Off", "Turn off autocomplete." },
 		{ "Expression2 Style", "Current mode:\nTab/CTRL+Tab to choose item;\nEnter/Space to use;\nArrow keys to abort." },
-		{ "Visual Studio Style", "Current mode:\nArrow keys to choose item;\nTab use.\nSpace to abort." },
-		{ "Eclipse Style", "Current mode:\nArrow keys to choose item;\nEnter to use;\nSpace to abort." },
+		{ "Visual Studio Style", "Current mode:\nArrow keys to choose item;\nTab use.\nSpace/Escape to abort." },
+		{ "Eclipse Style", "Current mode:\nArrow keys to choose item;\nEnter to use;\nSpace/Escape to abort." },
 	}
 
 	AutoCompleteControlOptions:SetSortItems(false)
@@ -1042,7 +1048,7 @@ function PANEL:PaintLine(row, drawpos, leftOffset, drawonlytext)
 		end
 		nonwhitespace = true
 		if offset > self.Size[2] then return end
-		if offset < 0 then -- When there is part of line horizontally begining before our scrolled area
+		if offset < 0 then -- When there is part of line horizontally beginning before our scrolled area
 			local length = cell[1]:len()
 			if length > -offset then
 				local line = cell[1]:sub(1-offset)
@@ -1480,7 +1486,8 @@ local function unindent(line)
 	--local i = line:find("%S")
 	--if i == nil or i > 5 then i = 5 end
 	--return line:sub(i)
-	return line:match("^ ? ? ? ?(.*)$")
+	local indent_str = TabHandler.ExpandTabsConVar:GetBool() and string.rep(" ?", TabHandler.TabSizeConVar:GetInt()) or "\t"
+	return line:match("^" .. indent_str .. "(.*)$")
 end
 
 function PANEL:_OnTextChanged()
@@ -1580,7 +1587,7 @@ function PANEL:ScrollCaret()
 	local visCaret = self.Caret[1] - self:GetRowOffset(self.Caret[1])
 	if visCaret - self.Scroll[1] < 3 then
 		local line = self.Caret[1]-3
-		while line > 1 and (self.Rows[line][3] or visCaret-line < 3)  do
+		while line > 1 and ((self.Rows[line] and self.Rows[line][3]) or visCaret-line < 3)  do
 			line = line - 1
 		end
 		self.ScrollBar:SetScrollFix(math.max(line,1))
@@ -1588,7 +1595,7 @@ function PANEL:ScrollCaret()
 	if visCaret - self.Scroll[1] > self.Size[1] - 2 then
 		local line = self.Scroll[1]
 		local lines = #self.Rows
-		while line <= lines and (self.Rows[line][3] or visCaret - line > self.Size[1] - 2) do
+		while line <= lines and ((self.Rows[line] and self.Rows[line][3]) or visCaret - line > self.Size[1] - 2) do
 			line = line + 1
 		end
 		self.ScrollBar:SetScrollFix(math.max(line,1))
@@ -2043,7 +2050,7 @@ function PANEL:CreateFindWindow()
 	-- Replace all button
 	local ReplaceAll = vgui.Create("DButton", replacetab)
 	ReplaceAll:SetText("Replace All")
-	ReplaceAll:SetToolTip("Replace all occurences of the match in the entire file, and close the Find window.")
+	ReplaceAll:SetToolTip("Replace all occurrences of the match in the entire file, and close the Find window.")
 	ReplaceAll:SetPos(233, 54)
 	ReplaceAll:SetSize(70, 20)
 	ReplaceAll.DoClick = function(pnl)
@@ -2242,13 +2249,17 @@ function PANEL:Indent(shift)
 	end
 	if shift then
 		-- shift-TAB with a selection --
-		local tmp = self:GetSelection():gsub("\n ? ? ? ?", "\n")
+		local indent_str = TabHandler.ExpandTabsConVar:GetBool() and string.rep(" ?", TabHandler.TabSizeConVar:GetInt()) or "\t"
+		local tmp = self:GetSelection():gsub("\n" .. indent_str, "\n")
 
 		-- makes sure that the first line is outdented
 		self:SetSelection(unindent(tmp))
 	else
 		-- plain TAB with a selection --
-		self:SetSelection("    " .. self:GetSelection():gsub("\n", "\n    "))
+		-- Use the value of the ConVar sf_editor_wire_tab_size to determine how many spaces should be added, and
+		-- sf_editor_wire_expand_tabs to know if spaces should be inserted at all.
+		local indent_str = TabHandler.ExpandTabsConVar:GetBool() and string.rep(" ", TabHandler.TabSizeConVar:GetInt()) or "\t"
+		self:SetSelection(indent_str .. self:GetSelection():gsub("\n", "\n" .. indent_str))
 	end
 	-- restore selection
 	self.Caret = self:CopyPosition(tab_caret)
@@ -2567,7 +2578,9 @@ function PANEL:_OnKeyCodeTyped(code)
 			if self:AutocompleteKeybind(code) then return end
 			local row = self:GetRowText(self.Caret[1]):sub(1, self.Caret[2]-1)
 			local diff = (row:find("%S") or (row:len() + 1))-1
-			local tabs = string_rep("    ", math_floor(diff / 4))
+
+			local indent_str = TabHandler.ExpandTabsConVar:GetBool() and string.rep(" ", TabHandler.TabSizeConVar:GetInt()) or "\t"
+			local tabs = string_rep(indent_str, TabHandler.ExpandTabsConVar:GetBool() and math_floor(diff / TabHandler.TabSizeConVar:GetInt()) or diff)
 			if TabHandler.AutoIndentConVar:GetBool() then
 				local function countMatches(s,open,close)
 					-- add spaces to string to detect whole word
@@ -2584,7 +2597,7 @@ function PANEL:_OnKeyCodeTyped(code)
 				if countMatches(row,{"{"},"}") > 0 or 
 					countMatches(row,{"%sthen%s","%sdo%s","[,%s%(]function[%s%(]","%selse%s"},"%send[%s%p]") > 0 or 
 					countMatches(row,{"%srepeat%s"},"%suntil%s") > 0 then 
-						tabs = tabs .. "    "
+						tabs = tabs .. indent_str
 				end
 			end
 			self:SetSelection("\n" .. tabs)
@@ -2615,8 +2628,11 @@ function PANEL:_OnKeyCodeTyped(code)
 			else
 				local buffer = self:GetArea({ self.Caret, { self.Caret[1], 1 } })
 				local delta = -1
-				if self.Caret[2] % 4 == 1 and #(buffer) > 0 and string_rep(" ", #(buffer)) == buffer then
-					delta = -4
+				if TabHandler.ExpandTabsConVar:GetInt() then
+					local ts = TabHandler.TabSizeConVar:GetInt()
+					if self.Caret[2] % ts == 1 and #(buffer) > 0 and string_rep(" ", #(buffer)) == buffer then
+						delta = -ts
+					end
 				end
 				self:SetCaret(self:MovePosition(self.Caret, delta))
 			end
@@ -2626,8 +2642,11 @@ function PANEL:_OnKeyCodeTyped(code)
 			else
 				local buffer = self:GetArea({ { self.Caret[1], self.Caret[2] + 4 }, { self.Caret[1], 1 } })
 				local delta = 1
-				if self.Caret[2] % 4 == 1 and string_rep(" ", #(buffer)) == buffer and #(self.Rows[self.Caret[1]][1]) >= self.Caret[2] + 4 - 1 then
-					delta = 4
+				if TabHandler.ExpandTabsConVar:GetInt() then
+					local ts = TabHandler.TabSizeConVar:GetInt()
+					if self.Caret[2] % ts == 1 and string_rep(" ", #(buffer)) == buffer and #(self.Rows[self.Caret[1]][1]) >= self.Caret[2] + ts - 1 then
+						delta = ts
+					end
 				end
 				self:SetCaret(self:MovePosition(self.Caret, delta))
 			end
@@ -2658,8 +2677,11 @@ function PANEL:_OnKeyCodeTyped(code)
 			else
 				local buffer = self:GetArea({ self.Caret, { self.Caret[1], 1 } })
 				local delta = -1
-				if self.Caret[2] % 4 == 1 and #(buffer) > 0 and string_rep(" ", #(buffer)) == buffer then
-					delta = -4
+				if TabHandler.ExpandTabsConVar:GetBool() then
+					local ts = TabHandler.TabSizeConVar:GetInt()
+					if self.Caret[2] % ts == 1 and #(buffer) > 0 and string_rep(" ", #(buffer)) == buffer then
+						delta = -ts
+					end
 				end
 				self:SetCaret(self:SetArea({ self.Caret, self:MovePosition(self.Caret, delta) }))
 				if self.OnTextChanged then self:OnTextChanged() end
@@ -2671,10 +2693,13 @@ function PANEL:_OnKeyCodeTyped(code)
 			if self:HasSelection() then
 				self:SetSelection()
 			else
-				local buffer = self:GetArea({ { self.Caret[1], self.Caret[2] + 4 }, { self.Caret[1], 1 } })
 				local delta = 1
-				if self.Caret[2] % 4 == 1 and string_rep(" ", #(buffer)) == buffer and #(self.Rows[self.Caret[1]][1]) >= self.Caret[2] + 4 - 1 then
-					delta = 4
+				if TabHandler.ExpandTabsConVar:GetBool() then
+					local ts = TabHandler.TabSizeConVar:GetInt()
+					local buffer = self:GetArea({ { self.Caret[1], self.Caret[2] + ts }, { self.Caret[1], 1 } })
+					if self.Caret[2] % ts == 1 and string_rep(" ", #(buffer)) == buffer and #(self.Rows[self.Caret[1]][1]) >= self.Caret[2] + ts - 1 then
+						delta = ts
+					end
 				end
 				self:SetCaret(self:SetArea({ self.Caret, self:MovePosition(self.Caret, delta) }))
 				if self.OnTextChanged then self:OnTextChanged() end
@@ -2695,18 +2720,25 @@ function PANEL:_OnKeyCodeTyped(code)
 		else
 			-- TAB without a selection --
 			if shift then
-				local newpos = self.Caret[2]-4
-				if newpos < 1 then newpos = 1 end
-				self.Start = { self.Caret[1], newpos }
-				if self:GetSelection():find("%S") then
-					-- TODO: what to do if shift-tab is pressed within text?
-					self.Start = self:CopyPosition(self.Caret)
-				else
-					self:SetSelection("")
+				if TabHandler.ExpandTabsConVar:GetBool() then
+					local newpos = self.Caret[2]-TabHandler.TabSizeConVar:GetInt()
+					if newpos < 1 then newpos = 1 end
+					self.Start = { self.Caret[1], newpos }
+					if self:GetSelection():find("%S") then
+						-- TODO: what to do if shift-tab is pressed within text?
+						self.Start = self:CopyPosition(self.Caret)
+					else
+						self:SetSelection("")
+					end
 				end
 			else
-				local count = (self.Caret[2] + 2) % 4 + 1
-				self:SetSelection(string_rep(" ", count))
+				if TabHandler.ExpandTabsConVar:GetBool() then
+					local ts = TabHandler.TabSizeConVar:GetInt()
+					local count = ts - (self.Caret[2] - 1) % ts
+					self:SetSelection(string_rep(" ", count))
+				else
+					self:SetSelection("\t")
+				end
 			end
 		end
 		-- signal that we want our focus back after (since TAB normally switches focus)
@@ -3070,12 +3102,13 @@ end
 
 function PANEL:AutocompleteApply()
 	local selection = self.acPanel:GetSelected()
-	self:SetCaret(self:SetArea({{self.Caret[1], math.max(1, self.Caret[2]-selection.replacelength)}, self.Caret }, selection.replace ))
-	if selection.reopen then
-		self:AutocompleteOpen()
-	else
-		self:AutocompleteClose()
+	if selection then
+		self:SetCaret(self:SetArea({{self.Caret[1], math.max(1, self.Caret[2]-selection.replacelength)}, self.Caret }, selection.replace ))
+		if selection.reopen then
+			return self:AutocompleteOpen()
+		end
 	end
+	self:AutocompleteClose()
 end
 
 function PANEL:AutocompleteClose()
@@ -3131,6 +3164,13 @@ function PANEL:AutocompleteCreate()
 		end
 	end
 
+	-- This is for allowing escape to kill the autocomplete
+	hook.Add("OnPauseMenuShow", self, function()
+		if TabHandler.ACControlStyle:GetInt() ~= AC_CONTROL_E2 and IsValid(self.acPanel) and self.acPanel:IsVisible() then
+			self:AutocompleteClose()
+			return false
+		end
+	end)
 	local controlSchemes = setmetatable({
 		[AC_CONTROL_E2] = function( pnl )
 			local t = CurTime()
@@ -3176,10 +3216,7 @@ function PANEL:AutocompleteCreate()
 		end,
 	}, {__index = function() return function() end end})
 
-	local function setThink() acPanel.Think = controlSchemes[TabHandler.ACControlStyle:GetInt()] end
-	setThink()
-	cvars.RemoveChangeCallback(TabHandler.ACControlStyle:GetName(), "autocompletestyle")
-	cvars.AddChangeCallback(TabHandler.ACControlStyle:GetName(), setThink, "autocompletestyle")
+	SF.CvarCallback(TabHandler.ACControlStyle, function(val) acPanel.Think = controlSchemes[math.Clamp(math.floor(val), 0, #controlSchemes)] end, "number")
 
 	local suggestionlist = vgui.Create( "DPanelList", acPanel )
 	suggestionlist:DockMargin(6, 6, 6, 6)
@@ -3367,13 +3404,8 @@ function PANEL:GetSyntaxColor(name)
 end
 
 function PANEL:SyntaxColorLine(line)
-	prev = prev or {}
 	if #self.Rows[line] > 2048 then -- Too long to parse
 		local cols = TabHandler.Modes.Text.SyntaxColorLine(self, line)
-		for k,v in pairs(prev) do -- Pass along unfinished etc
-			if isnumber(k) then continue end
-			cols[k] = v
-		end
 		return cols
 	end
 	local cols = self:DoAction("SyntaxColorLine", line)

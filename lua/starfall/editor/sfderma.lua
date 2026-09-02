@@ -270,6 +270,7 @@ function PANEL:Setup(folder)
 		{"Async", "https://raw.githubusercontent.com/keever50/StarfallLibraries/master/async.txt"},
 		{"Console", "https://raw.githubusercontent.com/Derpius/public-starfalls/master/console/console.txt"},
 		{"CriticalPD", "https://raw.githubusercontent.com/thegrb93/MyStarfallScripts/master/libs/CriticalPD.txt"},
+		{"FunctionalLua", "https://raw.githubusercontent.com/luafun/luafun/refs/heads/master/fun.lua"},
 		{"GifLoader", "https://raw.githubusercontent.com/thegrb93/MyStarfallScripts/master/libs/gifspritesheet.txt"},
 		{"HoloText", "https://raw.githubusercontent.com/Derpius/public-starfalls/master/libs/holotext/main.txt"},
 		{"HttpQueue", "https://raw.githubusercontent.com/ANormalTwig/PublicStarfalls/main/libraries/http_queueing.lua"},
@@ -432,15 +433,19 @@ function PANEL:DoRightClick(node)
 				end)
 		self.menu:AddSpacer()
 		self.menu:AddOption("Delete", function ()
-				Derma_Query("Are you sure you want to delete this file?",
+				local fileName = node:GetFileName()
+
+				Derma_Query(
+					"Are you sure you want to delete '" .. string.sub(fileName, 10) .. "'?",
 					"Delete file",
 					"Delete",
 					function ()
-						file.Delete(node:GetFileName())
-						SF.AddNotify(LocalPlayer(), "File deleted: " .. node:GetFileName(), "GENERIC", 7, "DRIP3")
+						file.Delete(fileName)
+						SF.AddNotify(LocalPlayer(), "File deleted: " .. fileName, "GENERIC", 7, "DRIP3")
 						self:ReloadTree()
 					end,
-					"Cancel")
+					"Cancel"
+				)
 			end)
 	elseif menu == "folder" then
 		local function expandChildren(node, expand)

@@ -98,11 +98,13 @@ hook.Add("FinishChat","SF_StartChat",function() isChatOpen=false end)
 
 local function CheckButtonPerms(instance, ply, button)
 	if not IsFirstTimePredicted() and not game.SinglePlayer() then return false end
-	if not haspermission(instance, nil, "input") then return false end
-	if isChatOpen and not haspermission(instance, nil, "input.chat") then
-		local notMouseButton = button < MOUSE_FIRST and button > MOUSE_LAST
-		local notJoystick = button < JOYSTICK_FIRST and button > JOYSTICK_LAST
-		if notMouseButton and notJoystick then return false end -- Mouse and joystick are allowed, they don't put text into the chat
+	if instance.player ~= SF.Superuser then
+		if not haspermission(instance, nil, "input") then return false end
+		if isChatOpen and not haspermission(instance, nil, "input.chat") then
+			local notMouseButton = button < MOUSE_FIRST and button > MOUSE_LAST
+			local notJoystick = button < JOYSTICK_FIRST and button > JOYSTICK_LAST
+			if notMouseButton and notJoystick then return false end -- Mouse and joystick are allowed, they don't put text into the chat
+		end
 	end
 
 	return true, { button }
@@ -129,7 +131,7 @@ SF.hookAdd(PlayerButtonUp, "inputreleased", CheckButtonPerms)
 -- @param string bind Name of keybind pressed
 -- @return boolean Returning true will block the binding from being pressed for the chip owner
 SF.hookAdd("PlayerBindPress", "inputbindpressed", function(instance, ply, bind)
-	if haspermission(instance, nil, "input") then
+	if instance.player == SF.Superuser or haspermission(instance, nil, "input") then
 		return true, {bind}
 	end
 	return false
@@ -145,7 +147,7 @@ end)
 -- @param number x X coordinate moved
 -- @param number y Y coordinate moved
 SF.hookAdd("InputMouseApply", "mousemoved", function(instance, _, x, y)
-	if haspermission(instance, nil, "input") then
+	if instance.player == SF.Superuser or haspermission(instance, nil, "input") then
 		if x~=0 or y~=0 then
 			return true, { x, y }
 		end
@@ -160,7 +162,7 @@ end)
 -- @class hook
 -- @param number delta Rotate delta
 SF.hookAdd("StartCommand", "mousewheeled", function(instance, ply, cmd)
-	if haspermission(instance, nil, "input") then
+	if instance.player == SF.Superuser or haspermission(instance, nil, "input") then
 		local delta = cmd:GetMouseWheel()
 		if delta ~= 0 then
 			return true, {delta}
@@ -175,7 +177,7 @@ local oldOnMouseWheeled = wpanel.OnMouseWheeled or function() end
 function wpanel:OnMouseWheeled(delta)
 	oldOnMouseWheeled(self, delta)
 	for inst, _ in pairs(SF.allInstances) do
-		if haspermission(inst, nil, "input") then
+		if inst.player == SF.Superuser or haspermission(inst, nil, "input") then
 			inst:runScriptHook("mousewheeled", delta)
 		end
 	end
@@ -192,15 +194,12 @@ SF.RegisterLibrary("input")
 return function(instance)
 local checkpermission = instance.player ~= SF.Superuser and SF.Permissions.check or function() end
 
-local getent
+local ents_methods, ent_meta, ewrap, eunwrap = instance.Types.Entity.Methods, instance.Types.Entity, instance.Types.Entity.Wrap, instance.Types.Entity.Unwrap
+
 local lockedControlCooldown = 0
 
 local inputdata = {controlsLocked = false, cursorEnabled = false}
 instance.data.input = inputdata
-
-instance:AddHook("initialize", function()
-	getent = instance.Types.Entity.GetEntity
-end)
 
 instance:AddHook("deinitialize", function()
 	if inputdata.cursorEnabled then
@@ -257,7 +256,7 @@ function input_library.isKeyDown(key)
 	checkluatype(key, TYPE_NUMBER)
 
 	checkpermission(instance, nil, "input")
-	if isChatOpen and not haspermission(instance, nil, "input.chat") then return false end
+	if isChatOpen and not (instance.player == SF.Superuser or haspermission(instance, nil, "input.chat")) then return false end
 
 	return input.IsKeyDown(key)
 end
@@ -350,10 +349,27 @@ end
 -- @client
 -- @param Weapon weapon The weapon entity to select
 function input_library.selectWeapon(weapon)
-	local ent = getent(weapon)
+	local ent = eunwrap(weapon)
 	if not (ent:IsWeapon() and ent:IsCarriedByLocalPlayer()) then SF.Throw("This weapon is not your own!", 2) end
 	checkpermission(instance, nil, "input.emulate")
 	input.SelectWeapon( ent )
+end
+
+--- Sets the position of your cursor. Your cursor must be enabled.
+-- @client
+-- @param number x
+-- @param number y
+function input_library.setCursorPos(x, y)
+	checkpermission(instance, nil, "input.emulate")
+
+	if not vgui.CursorVisible() then
+		SF.Throw("Your cursor is not visible", 2)
+	end
+
+	checkluatype(x, TYPE_NUMBER)
+	checkluatype(y, TYPE_NUMBER)
+
+	input.SetCursorPos(x, y)
 end
 
 --- Locks game controls for typing purposes. Alt will unlock the controls. Has a 10 second cooldown.
@@ -385,7 +401,7 @@ end
 -- @client
 -- @return boolean Whether the player's control can be locked
 function input_library.canLockControls()
-	return haspermission(instance, nil, "input.lockcontrols") and lockedControlCooldown + inputLockCooldown:GetFloat() <= CurTime()
+	return instance.player == SF.Superuser or (haspermission(instance, nil, "input.lockcontrols") and lockedControlCooldown + inputLockCooldown:GetFloat() <= CurTime())
 end
 
 --- Returns whether the game menu overlay ( main menu ) is open or not.

@@ -98,6 +98,12 @@ game_library.getRealTickInterval = engine.AbsoluteFrameTime
 -- @return number Ticks
 game_library.getTickCount = engine.TickCount
 
+--- Returns the public IP address and port of the current server
+-- @name game_library.getIPAddress
+-- @class function
+-- @return string The IP address and port in the format "x.x.x.x:x"
+game_library.getIPAddress = game.GetIPAddress
+
 --- Checks if a model exists in the game files
 -- @param string path Filepath in game folder
 -- @return boolean? True if exists, false if not, nil if error
@@ -108,19 +114,33 @@ function game_library.modelExists(path)
 	return file.Exists(path, "GAME")
 end
 
+--- Returns the ammo id for a given name
+-- @name game_library.getAmmoID
+-- @class function
+-- @param string name The ammo name
+-- @return number The id or -1 if not found
+game_library.getAmmoID = game.GetAmmoID
+
+--- Returns the ammo name for a given id
+-- @name game_library.getAmmoName
+-- @class function
+-- @param number id The ammo id
+-- @return string The ammo name
+game_library.getAmmoName = game.GetAmmoName
+
 --- Returns AmmoData for given id
+-- @name game_library.getAmmoData
+-- @class function
 -- @param number id See https://wiki.facepunch.com/gmod/Default_Ammo_Types
 -- @return table AmmoData, see https://wiki.facepunch.com/gmod/Structures/AmmoData
-function game_library.getAmmoData(id)
-	return game.GetAmmoData(id)
-end
+game_library.getAmmoData = game.GetAmmoData
 
 --- Returns the real maximum amount of ammo of given ammo ID, regardless of the setting of gmod_maxammo convar
+-- @name game_library.getAmmoMax
+-- @class function
 -- @param number id See https://wiki.facepunch.com/gmod/Default_Ammo_Types
 -- @return number The maximum amount of reserve ammo a player can hold of this ammo type
-function game_library.getAmmoMax(id)
-	return game.GetAmmoMax(id)
-end
+game_library.getAmmoMax = game.GetAmmoMax
 
 --- Returns the worldspawn entity
 -- @return Entity Worldspawn
@@ -129,7 +149,6 @@ function game_library.getWorld()
 end
 
 --- Returns a table with keys that are condensed model path names and value identifiers of said paths
--- @shared
 -- @return table List of valid playermodels
 function game_library.getPlayerModels()
 	local ret = {}
@@ -139,19 +158,33 @@ function game_library.getPlayerModels()
 	return ret
 end
 
---- Given a 64bit SteamID will return a STEAM_0: style Steam ID
--- @param string id The 64 bit Steam ID
--- @return string STEAM_0 style Steam ID
-function game_library.steamIDFrom64(id)
-	return util.SteamIDFrom64(id)
+--- Returns the wind's velocity at a given position, as influenced by current map's env_wind entities
+-- @param Vector? pos Optional position to get wind speed at. If specified, wind controllers with windradius other than -1 will be taken into account, if the point is within their radius. If omitted, only the global wind controller will be used (if one exists). This argument will be ignored on client-side and will be treated as nil because the position of env_wind is not currently networked to clients
+-- @return Vector The current wind velocity at a given position
+function game_library.getWindSpeed(pos)
+	if pos ~= nil then pos = vunwrap1(pos) end
+	return vwrap(game.GetWindSpeed(pos))
 end
 
+--- Given a 64bit SteamID will return a STEAM_0: style Steam ID
+-- @name game_library.steamIDFrom64
+-- @class function
+-- @param string id The 64 bit Steam ID
+-- @return string STEAM_0 style Steam ID
+game_library.steamIDFrom64 = util.SteamIDFrom64
+
 --- Given a STEAM_0 style Steam ID will return a 64bit Steam ID
+-- @name game_library.steamIDTo64
+-- @class function
 -- @param string id The STEAM_0 style id
 -- @return string 64bit Steam ID
-function game_library.steamIDTo64(id)
-	return util.SteamIDTo64(id)
-end
+game_library.steamIDTo64 = util.SteamIDTo64
+
+--- Returns the name of the currently running gamemode
+-- @name game_library.getActiveGamemode
+-- @class function
+-- @return string The name of the active gamemode
+game_library.getActiveGamemode = engine.ActiveGamemode
 
 if SERVER then
 
@@ -162,21 +195,22 @@ if SERVER then
 	-- @param number damage The amount of damage to be applied
 	function game_library.blastDamage(damageOrigin, damageRadius, damage)
 		checkpermission(instance, nil, "game.blastDamage")
-		util.BlastDamage(instance.entity, instance.player, vunwrap1(damageOrigin), math.Clamp(damageRadius, 0, 1500), damage)
+		local attacker = (instance.player == SF.Superuser) and instance.entity or instance.player
+		util.BlastDamage(instance.entity, attacker, vunwrap1(damageOrigin), math.Clamp(damageRadius, 0, 1500), damage)
 	end
 
 	--- Fires a bullet. Bullet made with this function will not have any tracer, you will have to make them yourself.
 	-- @server
 	-- @param Vector src The position to fire the bullets from.
-	-- @param Vector Dir The fire direction.
+	-- @param Vector dir The fire direction.
 	-- @param number? damage The damage dealt by the bullet. Default: (1-100)
 	-- @param number? num The amount of bullets to fire. Default: (1-40)
 	-- @param number? force The force of the bullets. Default: (0-100)
 	-- @param number? distance Maximum distance the bullet can travel.
-	-- @param Vector? Spread The spread, only x and y are needed.
+	-- @param Vector? spread The spread, only x and y are needed.
 	-- @param number? hullSize The hull size of the bullet. Default: (0-10)
 	-- @param Entity? ignoreEntity The entity that the bullet will ignore when it will be shot.
-	-- @param function? callback Function to be called with attacker, traceResult after the bullet was fired but before the damage is applied (the callback is called even if no damage is applied).
+	-- @param function? cb Function to be called with attacker, traceResult after the bullet was fired but before the damage is applied (the callback is called even if no damage is applied).
 	function game_library.bulletDamage(src, dir, damage, num, force, distance, spread, hullSize, ignoreEntity, cb)
 		checkpermission(instance, nil, "game.bulletDamage")
 		src = vunwrap1(src)
@@ -201,7 +235,7 @@ if SERVER then
 		local BulletInfo = {
 			Src = src,
 			Dir = dir,
-			Attacker = instance.player,
+			Attacker = (instance.player == SF.Superuser) and instance.entity or instance.player,
 			Damage = damage,
 			Force = force,
 			Distance = distance,
@@ -293,6 +327,20 @@ else
 	-- @return boolean If currently timing out
 	-- @return number Time since the connection started to timeout
 	game_library.isTimingOut = GetTimeoutInfo
+
+	--- Returns true if the game is currently recording a demo file (.dem)
+	-- @name game_library.isRecordingDemo
+	-- @client
+	-- @class function
+	-- @return boolean True if recording a demo
+	game_library.isRecordingDemo = engine.IsRecordingDemo
+
+	--- Returns whether the game menu overlay (escape/main menu) is open or not
+	-- @name game_library.isPauseMenuVisible
+	-- @client
+	-- @class function
+	-- @return boolean True if the game UI is visible
+	game_library.isPauseMenuVisible = gui.IsGameUIVisible
 
 end
 

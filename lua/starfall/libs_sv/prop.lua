@@ -13,14 +13,8 @@ registerprivilege("prop.createCustom", "Create custom prop", "Allows the user to
 local entList = SF.EntManager("props", "props", -1, "The number of props allowed to spawn via Starfall")
 local plyPropBurst = SF.BurstObject("props", "props", 4, 4, "Rate props can be spawned per second.", "Number of props that can be spawned in a short time.")
 
-local maxCustomSize = CreateConVar("sf_props_custom_maxsize", "2048", FCVAR_ARCHIVE, "The max hull size of a custom prop")
-local minVertexDistance = CreateConVar("sf_props_custom_minvertexdistance", "0.2", FCVAR_ARCHIVE, "The min distance between two vertices in a custom prop")
 
-local plyVertexCount = SF.LimitObject("props_custom_vertices", "custom prop vertices", 14400, "The max vertices allowed to spawn custom props per player")
-local maxVerticesPerConvex = CreateConVar("sf_props_custom_maxverticesperconvex", "300", FCVAR_ARCHIVE, "The max vertices allowed per convex")
-local maxConvexesPerProp = CreateConVar("sf_props_custom_maxconvexesperprop", "10", FCVAR_ARCHIVE, "The max convexes per prop")
-
---- Library for creating and manipulating physics-less models AKA "Props".
+--- Library for creating and manipulating physical models (props).
 -- @name prop
 -- @class library
 -- @libtbl props_library
@@ -56,7 +50,7 @@ end)
 -- @param Vector pos Initial entity position
 -- @param Angle ang Initial entity angles
 -- @param string model Model path
--- @param boolean? frozen True to spawn the entity in a frozen state. Default = False
+-- @param boolean? frozen True to spawn the entity in a frozen state. Default is false.
 -- @return Entity The prop object
 function props_library.create(pos, ang, model, frozen)
 
@@ -117,7 +111,7 @@ end
 --- Creates a ragdoll
 -- @server
 -- @param string model Model path
--- @param boolean? frozen True to spawn the entity in a frozen state. Default = False
+-- @param boolean? frozen True to spawn the entity in a frozen state. Default is false.
 -- @return Entity The ragdoll entity
 function props_library.createRagdoll(model, frozen)
 	checkpermission(instance, nil, "prop.createRagdoll")
@@ -175,13 +169,13 @@ end
 -- @server
 -- @param Vector pos The position to spawn the prop
 -- @param Angle ang The angles to spawn the prop
--- @param table vertices The table of tables of vertices that make up the physics mesh {{v1,v2,...},{v1,v2,...},...}
--- @param boolean? frozen True to spawn the entity in a frozen state. Default = False
+-- @param table meshConvexes The table of tables of vertices that make up the physics mesh {{v1,v2,...},{v1,v2,...},...}
+-- @param boolean? frozen True to spawn the entity in a frozen state. Default is false.
 -- @return Entity The prop object
-function props_library.createCustom(pos, ang, vertices, frozen)
+function props_library.createCustom(pos, ang, meshConvexes, frozen)
 	pos = SF.clampPos(vunwrap1(pos))
 	ang = aunwrap1(ang)
-	checkluatype(vertices, TYPE_TABLE)
+	checkluatype(meshConvexes, TYPE_TABLE)
 	if frozen~=nil then checkluatype(frozen, TYPE_BOOL) else frozen = false end
 
 	checkpermission(instance, nil, "prop.createCustom")
@@ -192,61 +186,24 @@ function props_library.createCustom(pos, ang, vertices, frozen)
 	entList:checkuse(ply, 1)
 	if instance.player ~= SF.Superuser and gamemode.Call("PlayerSpawnProp", ply, "starfall_prop")==false then SF.Throw("Another hook prevented the prop from spawning", 2) end
 
-	local uwVertices = {}
-	local max = maxCustomSize:GetFloat()
-	local mindist = minVertexDistance:GetFloat()^2
-	local maxVerticesPerConvex = maxVerticesPerConvex:GetInt()
-	local maxConvexesPerProp = maxConvexesPerProp:GetInt()
-
-	local totalVertices = 0
-	local streamdata = SF.StringStream()
-	streamdata:writeInt32(#vertices)
-	for k, v in ipairs(vertices) do
-		if k>maxConvexesPerProp then SF.Throw("Exceeded the max convexes per prop (" .. maxConvexesPerProp .. ")", 2) end
-		streamdata:writeInt32(#v)
-		totalVertices = totalVertices + #v
-		plyVertexCount:checkuse(ply, totalVertices)
+	local meshConvexesUnwrapped = {}
+	for k, v in ipairs(meshConvexes) do
 		local t = {}
 		for o, p in ipairs(v) do
-			if o>maxVerticesPerConvex then SF.Throw("Exceeded the max vertices per convex (" .. maxVerticesPerConvex .. ")", 2) end
-			local vec = vunwrap(p)
-			if math.abs(vec.x)>max or math.abs(vec.y)>max or math.abs(vec.z)>max then SF.Throw("The custom prop cannot exceed a hull size of " .. max, 2) end
-			if vec.x~=vec.x or vec.y~=vec.y or vec.z~=vec.z then SF.Throw("Your mesh contains nan values!", 2) end
-			for i=1, o-1 do
-				if t[i]:DistToSqr(vec) < mindist then
-					SF.Throw("No two vertices can have a distance less than " .. minVertexDistance:GetFloat(), 2)
-				end
-			end
-			streamdata:writeFloat(vec.x)
-			streamdata:writeFloat(vec.y)
-			streamdata:writeFloat(vec.z)
-			t[o] = vec
+			t[o] = vunwrap(p)
 		end
-		uwVertices[k] = t
+		meshConvexesUnwrapped[k] = t
 	end
-	streamdata = util.Compress(streamdata:getString())
-	SF.NetBurst:use(instance.player, #streamdata*8)
 
 	local propent
 	local ok, err = instance:runExternal(function()
-		propent = ents.Create("starfall_prop")
-		propent.streamdata = streamdata
-		propent:SetPos(pos)
-		propent:SetAngles(ang)
-		propent.Mesh = uwVertices
-		propent:Spawn()
+		propent = SF.createCustomProp(instance.player, pos, ang, meshConvexesUnwrapped)
 
 		local physobj = propent:GetPhysicsObject()
-		if not Phys_IsValid(physobj) then
-			SF.Throw("Custom prop generated with invalid physics object!", 2)
+		if Phys_IsValid(physobj) then
+			physobj:EnableMotion(not frozen)
+			physobj:Wake()
 		end
-
-		physobj:EnableCollisions(true)
-		physobj:EnableMotion(not frozen)
-		physobj:EnableDrag(true)
-		physobj:Wake()
-
-		propent:TransmitData()
 
 		if ply ~= SF.Superuser then
 			gamemode.Call("PlayerSpawnedProp", ply, "starfall_prop", propent)
@@ -264,10 +221,8 @@ function props_library.createCustom(pos, ang, vertices, frozen)
 		if Ent_IsValid(propent) then propent:Remove() end
 		SF.Throw("Failed to create entity (" .. tostring(err) .. ")", 2)
 	end
-	plyVertexCount:free(ply, -totalVertices)
-	entList:register(instance, propent, function()
-		plyVertexCount:free(ply, totalVertices)
-	end)
+
+	entList:register(instance, propent)
 	instance:checkCpu()
 
 	return ewrap(propent)
@@ -285,7 +240,7 @@ local allowed_components = {
 -- @param Angle ang Angle of created component
 -- @param string class Class of created component
 -- @param string model Model of created component
--- @param boolean? frozen True to spawn the entity in a frozen state. Default = False
+-- @param boolean? frozen True to spawn the entity in a frozen state. Default is false.
 -- @server
 -- @return Entity Component entity
 function props_library.createComponent(pos, ang, class, model, frozen)
@@ -384,7 +339,7 @@ end
 -- @param Vector pos Position of created seat
 -- @param Angle ang Angle of created seat
 -- @param string model Model of created seat
--- @param boolean? frozen True to spawn the entity in a frozen state. Default = False
+-- @param boolean? frozen True to spawn the entity in a frozen state. Default is false.
 -- @server
 -- @return Entity The seat object
 function props_library.createSeat(pos, ang, model, frozen)
@@ -448,7 +403,7 @@ end
 -- @param Vector pos Position of created sent
 -- @param Angle ang Angle of created sent
 -- @param string class Class of created sent
--- @param boolean? frozen True to spawn the entity in a frozen state. Default = False
+-- @param boolean? frozen True to spawn the entity in a frozen state. Default is false.
 -- @param table? data Optional table, additional entity data to be supplied to certain SENTs. See prop.SENT_Data_Structures table in Docs for list of SENTs
 -- @server
 -- @return Entity The sent object
@@ -496,9 +451,9 @@ function props_library.createSent(pos, ang, class, frozen, data)
 		end
 
 		entOk, entErr = instance:runExternal(function()
-			local sent = scripted_ents.GetStored( class )
-			if sent and sent.t.SpawnFunction then
-				entity = sent.t.SpawnFunction( sent.t, ply, SF.dumbTrace(NULL, pos), class )
+			local spawn_function = scripted_ents.GetMember(class, "SpawnFunction")
+			if spawn_function then
+				entity = spawn_function( scripted_ents.GetStored(class).t, ply, SF.dumbTrace(NULL, pos), class )
 			else
 				entity = ents.Create( class )
 				if Ent_IsValid(entity) then
@@ -517,7 +472,7 @@ function props_library.createSent(pos, ang, class, frozen, data)
 			if gamemode.Call("PlayerSpawnNPC", ply, class, "") == false then SF.Throw("Another hook prevented the npc from spawning", 2) end
 		end
 
-		
+
 		entOk, entErr = instance:runExternal(function()
 			entity = ents.Create(npc.Class)
 
@@ -595,10 +550,10 @@ function props_library.createSent(pos, ang, class, frozen, data)
 
 		hookcall = "PlayerSpawnedVehicle"
 	elseif sent2 then
-		local classTbl = scripted_ents.GetStored(class)
-		if not classTbl then SF.Throw("This entity doesn't exist!", 2) end
+		if not scripted_ents.GetStored(class) then SF.Throw("This entity doesn't exist!", 2) end
+
 		if ply ~= SF.Superuser then
-			if classTbl.t.AdminOnly and not ply:IsAdmin() then SF.Throw("This sent is admin only!", 2) end
+			if scripted_ents.GetMember(class, "AdminOnly") and not ply:IsAdmin() then SF.Throw("This sent is admin only!", 2) end
 			if gamemode.Call("PlayerSpawnSENT", ply, class) == false then SF.Throw("Another hook prevented the sent from spawning", 2) end
 		end
 
@@ -705,9 +660,9 @@ function props_library.createSent(pos, ang, class, frozen, data)
 	end
 end
 
---- Checks if a user can spawn anymore props.
+--- Checks if you can spawn any more props
 -- @server
--- @return boolean True if user can spawn props, False if not.
+-- @return boolean Returns true if you can spawn props, false if not
 function props_library.canSpawn()
 	if not SF.Permissions.hasAccess(instance, nil, "prop.create") then return false end
 	return entList:check(instance.player) > 0 and plyPropBurst:check(instance.player) >= 1
@@ -721,7 +676,7 @@ function props_library.propsLeft()
 	return math.min(entList:check(instance.player), plyPropBurst:check(instance.player))
 end
 
---- Returns how many props per second the user can spawn
+--- Returns how many props you can spawn per second
 -- @server
 -- @return number Number of props per second the user can spawn
 function props_library.spawnRate()

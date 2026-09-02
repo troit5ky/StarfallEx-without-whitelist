@@ -3,14 +3,17 @@ local checkluatype = SF.CheckLuaType
 local haspermission = SF.Permissions.hasAccess
 local registerprivilege = SF.Permissions.registerPrivilege
 
+local ENT_META = FindMetaTable("Entity")
+local Ent_IsValid = ENT_META.IsValid
+
 --Can only return if you are the first argument
 local function returnOnlyOnYourself(instance, args, ply)
-	if args[1] and instance.player == ply then return args[2] end
+	if args[1] and (instance.player == ply or instance.player == SF.Superuser) then return args[2] end
 end
 
 --Can only return false on yourself
 local function returnOnlyOnYourselfFalse(instance, args, ply)
-	if args[1] and instance.player == ply and args[2]==false then return false end
+	if args[1] and args[2]==false and (instance.player == ply or instance.player == SF.Superuser) then return false end
 end
 
 local add = SF.hookAdd
@@ -170,7 +173,7 @@ if SERVER then
 	gameevent.Listen("player_say")
 	add("player_say", "playerchat", function(instance, data)
 		local ply = Player(data.userid)
-		return true, {instance.WrapObject(ply), data.text, data.teamonly, not ply:Alive()}
+		return true, {instance.WrapObject(ply), data.text, data.teamonly, not (Ent_IsValid(ply) and ply:Alive())}
 	end)
 
 	--- Called when a players sprays their logo
@@ -304,7 +307,7 @@ else
 	-- @param boolean isdead Whether the message was send from a dead player
 	-- @return boolean Return true to hide the message. Can only be done for the owner of the chip
 	add("OnPlayerChat", "playerchat", nil, function(instance, ret)
-		if ret[1] and instance.player == LocalPlayer() and ret[2] then return true end
+		if ret[1] and ret[2] and (instance.player == LocalPlayer() or instance.player == SF.Superuser) then return true end
 	end)
 
 	--- Called when the player's chat box text changes.
@@ -387,6 +390,13 @@ else
 	-- @class hook
 	-- @client
 	add("OnContextMenuClose")
+
+	--- Called whenever a CUserCmd is made for the local player. This runs twice per frame, one for movement one for camera. You can use cmd:getCommandNumber to check which one it is if you want to only run on one of them. Camera will have a 0 command number.
+	-- @name CreateMove
+	-- @class hook
+	-- @client
+	-- @param CUserCmd cmd The UserCmd being created
+	add("CreateMove")
 end
 
 -- Shared hooks
@@ -412,13 +422,13 @@ add("PlayerNoClip")
 -- @param number volume Volume of the footstep
 -- @return boolean? Return true to prevent default step sound (only on chip owner)
 add("PlayerFootstep", nil, function(instance, ply, pos, foot, sound, volume)
-    return true, {
-        instance.WrapObject(ply),
-        instance.Types.Vector.Wrap(pos),
-        foot,
-        sound,
-        volume,
-    }
+	return true, {
+		instance.WrapObject(ply),
+		instance.Types.Vector.Wrap(pos),
+		foot,
+		sound,
+		volume,
+	}
 end, returnOnlyOnYourself )
 
 --- Called when a player jumps.
@@ -510,11 +520,11 @@ add("DoAnimationEvent")
 
 -- Entity hooks
 
---- Called when an entity gets created
+--- Called the next frame after an entity is created
 -- @name OnEntityCreated
 -- @class hook
 -- @shared
--- @param Entity ent New entity
+-- @param Entity ent The created entity. May be invalid if deleted before this hook runs.
 add("OnEntityCreated", nil, function(instance, ent)
 	timer.Simple(0, function()
 		instance:runScriptHook("onentitycreated", instance.WrapObject(ent))
@@ -528,7 +538,6 @@ end)
 -- @shared
 -- @param Entity ent Entity being removed
 -- @param boolean fullupdate If clientside, will be true if the entity was removed by a fullupdate
-add("EntityRemoved")
 
 --- Called when an entity is broken
 -- @name PropBreak
@@ -606,6 +615,31 @@ add("StartEntityDriving")
 -- @shared
 add("Tick")
 
+--- This is basically a shared version of createMove.
+-- @name StartCommand
+-- @class hook
+-- @shared
+-- @param Player ply Player whose command is being processed
+-- @param CUserCmd cmd The UserCmd being processed
+add("StartCommand")
+
+--- Called each UserCmd for each player to transfer information from the UserCmd to the CMoveData before the move is processed.
+-- @name SetupMove
+-- @class hook
+-- @shared
+-- @param Player ply Player whose move is being setup
+-- @param CMoveData move The MoveData being processed
+-- @param CUserCmd cmd The UserCmd being processed
+add("SetupMove")
+
+--- Called each UserCmd for each player after their move has been processed.
+-- @name FinishMove
+-- @class hook
+-- @shared
+-- @param Player ply Player whose move is being finished
+-- @param CMoveData move The MoveData being processed
+add("FinishMove")
+
 --- Called when starfall chip errors
 -- @name StarfallError
 -- @class hook
@@ -666,11 +700,6 @@ SF.RegisterLibrary("hook")
 
 
 return function(instance)
-
-local getent
-instance:AddHook("initialize", function()
-	getent = instance.Types.Entity.GetEntity
-end)
 
 instance:AddHook("deinitialize", function()
 	SF.HookDestroyInstance(instance)
@@ -741,7 +770,7 @@ local hookrun = hook_library.run
 function hook_library.runRemote(recipient, ...)
 	local recipients
 	if recipient then
-		local ent = getent(recipient)
+		local ent = eunwrap(recipient)
 		if not ent.instance then SF.Throw("Entity has no starfall instance", 2) end
 		recipients = {
 			[ent.instance] = true
@@ -750,15 +779,18 @@ function hook_library.runRemote(recipient, ...)
 		recipients = SF.allInstances
 	end
 
+	local owner = instance.player
+	if owner == SF.Superuser then owner = game.GetWorld() end
+
 	local argn = select("#", ...)
 	local unsanitized = instance.Unsanitize({...})
 	local results = {}
 	for k, _ in pairs(recipients) do
 		local result
 		if k==instance then
-			result = { true, hookrun("remote", ewrap(instance.entity), pwrap(instance.player), ...) }
+			result = { true, hookrun("remote", ewrap(instance.entity), pwrap(owner), ...) }
 		else
-			result = k:runScriptHookForResult("remote", k.Types.Entity.Wrap(instance.entity), k.Types.Player.Wrap(instance.player), unpack(k.Sanitize(unsanitized), 1, argn))
+			result = k:runScriptHookForResult("remote", k.Types.Entity.Wrap(instance.entity), k.Types.Player.Wrap(owner), unpack(k.Sanitize(unsanitized), 1, argn))
 		end
 
 		if result[1] and result[2]~=nil then

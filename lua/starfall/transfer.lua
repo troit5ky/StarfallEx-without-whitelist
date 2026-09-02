@@ -8,50 +8,47 @@ function net.WriteReliableEntity(ent)
 end
 
 function net.ReadReliableEntity(cb)
-	SF.WaitForEntity(net.ReadUInt(16), net.ReadUInt(32), cb)
+	SF.WaitForEntity:add(net.ReadUInt(16), net.ReadUInt(32), cb)
 end
 
 -- Net extension stuff
 function net.ReadStarfall(ply, callback)
-	local callbacks = SERVER and 1 or 3
-	local error
 	local sfdata = {}
 
-	local function setup()
-		callbacks = callbacks - 1
-		if callbacks>0 then return end
-		if error then callback(false, sfdata, error) return end
+	local setup = SF.WaitForAllArgs(3, function(proc, owner, files)
+		if isentity(proc) then sfdata.proc = proc end
+		if isentity(owner) then sfdata.owner = owner end
+		if istable(files) then sfdata.files = files end
+
+		if not proc then callback(false, sfdata, "Invalid starfall processor entity") return end
+		if not owner then callback(false, sfdata, "Invalid starfall owner entity") return end
+		if not files then callback(false, sfdata, "Error transferring files") return end
 		callback(true, sfdata)
-	end
-	local function setupProc(e)
-		if e==nil then error="Invalid starfall processor entity" end
-		sfdata.proc=e setup()
-	end
-	local function setupOwner(e)
-		if e==nil then error="Invalid starfall owner entity" end
-		sfdata.owner=e setup()
-	end
-	local function setupFiles(data)
-		if data==nil then error="Net timeout" setup() return end
-		local ok, decompress = pcall(SF.DecompressFiles, data)
-		if not ok then error=decompress setup() return end
-		sfdata.files=decompress setup()
-	end
+	end)
 
 	if CLIENT then
 		if net.ReadBool() then
-			net.ReadReliableEntity(setupProc)
+			net.ReadReliableEntity(function(proc) setup(proc or false, nil, nil) end)
 		else
-			setup()
+			setup(true, nil, nil)
 		end
 		if net.ReadBool() then
-			net.ReadReliableEntity(setupOwner)
+			net.ReadReliableEntity(function(owner) setup(nil, owner or false, nil) end)
 		else
-			setup()
+			setup(nil, true, nil)
 		end
+	else
+		setup(true, true, nil)
 	end
+	sfdata.superuser = net.ReadBool()
 	sfdata.mainfile = net.ReadString()
-	net.ReadStream(ply, setupFiles)
+
+	net.ReadStream(ply, function(data)
+		if data==nil then setup(nil, nil, false) return end
+		local ok, files = pcall(SF.DecompressFiles, data)
+		if not ok then setup(nil, nil, false) return end
+		setup(nil, nil, files)
+	end)
 end
 
 function net.WriteStarfall(sfdata, callback)
@@ -70,6 +67,7 @@ function net.WriteStarfall(sfdata, callback)
 			net.WriteBool(false)
 		end
 	end
+	net.WriteBool(sfdata.superuser == true)
 	net.WriteString(sfdata.mainfile)
 
 	if sfdata.compressed then
@@ -252,7 +250,7 @@ else
 	function SF.SendError(chip, message, traceback)
 		local owner, is_blocked = chip.owner, false
 		if IsValid(owner) then
-			is_blocked = SF.BlockedUsers:isBlocked(owner:SteamID())
+			is_blocked = SF.BlockedUsers:contains(owner:SteamID())
 		end
 		net.Start("starfall_error")
 			net.WriteUInt(chip:EntIndex(), 16)
