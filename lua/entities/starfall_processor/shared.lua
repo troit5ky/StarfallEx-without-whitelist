@@ -114,10 +114,21 @@ function ENT:GetGateName()
 end
 
 function ENT:Error(err)
-	self.error = err
-	if self.instance then
-		self.instance:deinitialize()
-		self.instance = nil
+	local ent_tbl = self:GetTable()
+	ent_tbl.error = err
+	if ent_tbl.instance then
+		-- Snapshot the cpu usage the chip died at, since Think stops updating after the instance is gone
+		if ent_tbl.instance.perf then
+			local errus, errperc = ent_tbl.instance.perf:getCpuReadableMetrics()
+			ent_tbl.clErrorCPUus = errus
+			ent_tbl.clErrorCPUpercent = errperc
+			if SERVER then
+				ent_tbl.SetCPUus(self, errus)
+				ent_tbl.SetCPUpercent(self, errperc)
+			end
+		end
+		ent_tbl.instance:deinitialize()
+		ent_tbl.instance = nil
 	end
 
 	local msg = string.match(err.message, "[^\n]+") or ""
@@ -214,8 +225,10 @@ local function syncHud(ply, chip, activator, enabled)
 	hudsToSync[ply][chip] = {activator or game.GetWorld(), enabled}
 end
 
-net.Receive("starfall_hud_set_enabled" , function()
+net.Receive("starfall_hud_set_enabled" , function(len, sender)
 	local ply = net.ReadEntity()
+	-- Clients may only synchronize their own HUD connections.
+	if SERVER and ply ~= sender then return end
 	local chip = net.ReadEntity()
 	local activator = net.ReadEntity()
 	local enabled = net.ReadBool()

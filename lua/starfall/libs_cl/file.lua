@@ -24,6 +24,8 @@ local cv_temp_maxsize = CreateConVar("sf_file_tempmaxsize", "128", { FCVAR_ARCHI
 local cv_temp_maxage = CreateConVar("sf_file_tempmaxage", "604800", { FCVAR_ARCHIVE }, "The max age of a temp file in seconds (default 7 days)")
 local cv_max_concurrent_reads = CreateConVar("sf_file_asyncmax", "10", { FCVAR_ARCHIVE }, "The max concurrent async reads allowed")
 
+local writeTempBurst = SF.BurstObject("file_temp_write", "temp writes", 2, 64, "Regen rate of file.writeTemp burst in MB/second", "The file.writeTemp burst limit in MB.", 1000000)
+
 --- File functions. Allows modification of files.
 -- @name file
 -- @class library
@@ -180,8 +182,8 @@ return function(instance)
 local checkpermission = instance.player ~= SF.Superuser and SF.Permissions.check or function() end
 
 local files = {}
-local tempfilewrites = 0
 local concurrentreads = 0
+
 instance:AddHook("deinitialize", function()
 	for file in pairs(files) do
 		file:Close()
@@ -244,16 +246,18 @@ end
 --- Reads a file asynchronously. Can only read 'sf_file_asyncmax' files at a time
 -- @param string path Filepath relative to data/sf_filedata/.
 -- @param function callback A callback function for when the read operation finishes. It has 3 arguments: `filename` string, `status` number and `data` string
+-- @return number Status. `FSASYNC.OK` on success, `FSASYNC.ERR_*` on failure, see https://wiki.facepunch.com/gmod/Enums/FSASYNC
 function file_library.asyncRead(path, callback)
 	checkpermission (instance, path, "file.read")
 	checkluatype (path, TYPE_STRING)
 	checkluatype (callback, TYPE_FUNCTION)
 	if concurrentreads == cv_max_concurrent_reads:GetInt() then SF.Throw("Reading too many files asynchronously!", 2) end
 	concurrentreads = concurrentreads + 1
-	file.AsyncRead("sf_filedata/" .. SF.NormalizePath(path), "DATA", function(_, _, status, data)
+	local status = file.AsyncRead("sf_filedata/" .. SF.NormalizePath(path), "DATA", function(_, _, status, data)
 		concurrentreads = concurrentreads - 1
 		instance:runFunction(callback, path, status, data)
 	end)
+	return tonumber(status)
 end
 
 --- Reads a file asynchronously from path relative to base GMod directory
@@ -262,16 +266,18 @@ end
 -- 1. string filename - The name of the file
 -- 2. number status - The status of the read operation (see FSASYNC enum)
 -- 3. string data - The data read from the file
+-- @return number Status. `FSASYNC.OK` on success, `FSASYNC.ERR_*` on failure, see https://wiki.facepunch.com/gmod/Enums/FSASYNC
 function file_library.asyncReadInGame(path, callback)
 	if instance.player ~= LocalPlayer() then SF.Throw("Only chip owner can read game files", 2) end
 	checkluatype (path, TYPE_STRING)
 	checkluatype (callback, TYPE_FUNCTION)
 	if concurrentreads == cv_max_concurrent_reads:GetInt() then SF.Throw("Reading too many files asynchronously!", 2) end
 	concurrentreads = concurrentreads + 1
-	file.AsyncRead(SF.NormalizePath(path), "GAME", function(_, _, status, data)
+	local status = file.AsyncRead(SF.NormalizePath(path), "GAME", function(_, _, status, data)
 		concurrentreads = concurrentreads - 1
 		instance:runFunction(callback, path, status, data)
 	end)
+	return tonumber(status)
 end
 
 
@@ -309,6 +315,12 @@ function file_library.readTemp(filename)
 	return file.Read("sf_filedatatemp/"..instance.player:SteamID64().."/"..filename, "DATA")
 end
 
+--- Returns how many bytes you can write right now with file.writeTemp
+-- @return number Number of bytes that the file.writeTemp burst allows
+function file_library.getWriteTempBurstBytes()
+	return math.floor(writeTempBurst:check(instance.player))
+end
+
 --- Writes a temporary file. Throws an error if it is unable to.
 -- @param string filename The name to give the file. Must be only a file and not a path
 -- @param string data The data to write
@@ -316,17 +328,15 @@ end
 function file_library.writeTemp(filename, data)
 	checkluatype(filename, TYPE_STRING)
 	checkluatype(data, TYPE_STRING)
-
-	checkpermission (instance, nil, "file.writeTemp")
-	if tempfilewrites >= cv_temp_maxfiles:GetInt() then SF.Throw("Exceeded max number of files allowed to write!", 2) end
+	checkpermission(instance, nil, "file.writeTemp")
 
 	if #filename > 128 then SF.Throw("Filename is too long!", 2) end
 	checkExtension(filename)
 	filename = string.lower(string.GetFileFromFilename(filename))
 
-	local path = TempFileCache:Write(instance, filename, data)
-	tempfilewrites = tempfilewrites + 1
-	return path
+	writeTempBurst:use(instance.player, string.len(data))
+
+	return TempFileCache:Write(instance, filename, data)
 end
 
 --- Returns the path of a temp file if it exists. Otherwise returns nil

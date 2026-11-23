@@ -14,6 +14,7 @@ local Ent_IsValid, Ent_IsWorld = ENTMETA.IsValid, ENTMETA.IsWorld
 if SERVER then
 	SF.cpuQuota = CreateConVar("sf_timebuffer", 0.005, FCVAR_ARCHIVE, "The max average the CPU time can reach.")
 	SF.cpuBufferN = CreateConVar("sf_timebuffersize", 100, FCVAR_ARCHIVE, "The window width of the CPU time quota moving average.")
+	SF.cpuGlobalQuota = CreateConVar("sf_timebuffer_global", 0.0, FCVAR_ARCHIVE, "The max total average CPU time of all players combined. 0 disables the limit.")
 	SF.softLockProtection = CreateConVar("sf_timebuffersoftlock", 1, FCVAR_ARCHIVE, "Consumes more cpu, but protects from freezing the game. Only turn this off if you want to use a profiler on your scripts.")
 	SF.softLockProtectionSuperUser = CreateConVar("sf_timebuffersoftlock_superuser", 0, {FCVAR_ARCHIVE, FCVAR_REPLICATED}, "Determines whether CPU checks should be done for superusers as well?")
 	SF.RamCap = CreateConVar("sf_ram_max", 1500000, FCVAR_ARCHIVE, "If ram exceeds this limit (in kB), starfalls will be terminated")
@@ -22,6 +23,7 @@ else
 	SF.cpuQuota = CreateConVar("sf_timebuffer_cl", 0.006, FCVAR_ARCHIVE, "The max average the CPU time can reach.")
 	SF.cpuOwnerQuota = CreateConVar("sf_timebuffer_cl_owner", 0.015, FCVAR_ARCHIVE, "The max average the CPU time can reach for your own chips.")
 	SF.cpuBufferN = CreateConVar("sf_timebuffersize_cl", 100, FCVAR_ARCHIVE, "The window width of the CPU time quota moving average.")
+	SF.cpuGlobalQuota = CreateConVar("sf_timebuffer_cl_global", 0, FCVAR_ARCHIVE, "The max total average CPU time of all players combined. 0 disables the limit.")
 	SF.softLockProtection = CreateConVar("sf_timebuffersoftlock_cl", 1, FCVAR_ARCHIVE, "Enable Cpu-time limiting on other player's chips.")
 	SF.softLockProtectionOwner = CreateConVar("sf_timebuffersoftlock_cl_owner", 1, FCVAR_ARCHIVE, "Enable Cpu-time limiting on your own chips.")
 	SF.softLockProtectionSuperUser = CreateConVar("sf_timebuffersoftlock_superuser", 0, {FCVAR_ARCHIVE, FCVAR_REPLICATED}, "Determines whether CPU checks should be done for superusers as well?")
@@ -31,6 +33,8 @@ else
 end
 local ramlimit
 SF.CvarCallback(SF.RamCap, function(val) ramlimit = val end, "number")
+local globalquota
+SF.CvarCallback(SF.cpuGlobalQuota, function(val) globalquota = val end, "number")
 
 SF.Instance = {}
 SF.Instance.__index = SF.Instance
@@ -78,7 +82,8 @@ function SF.Instance.Compile(code, mainfile, player, entity, superuser)
 	if not ok then return false, { message = ppdata, traceback = "" } end
 	instance.ppdata = ppdata
 
-	if player:IsWorld() or superuser then
+	-- Only clients may trust the server's superuser flag; uploads must pass server authorization.
+	if player:IsWorld() or (CLIENT and superuser) then
 		player = SF.Superuser
 	elseif SERVER and ppdata.files[mainfile].superuser then
 		local ok, message = hook.Run("StarfallCanSuperUser", player)
@@ -343,7 +348,7 @@ function SF.Instance:BuildEnvironment()
 			return object
 		end
 		-- Clientside holograms don't have a gmod metatype so check manually
-		if isentity(object) and object.IsSFHologram then
+		if metatable and metatable.__index and object.IsSFHologram then
 			return self.Types.Hologram.Wrap(object)
 		end
 	end
@@ -485,8 +490,33 @@ function SF.Instance:DoAliases()
 end
 
 -- Monitor average cpu and ram usage by instance
-local CpuRamAverage = {
-	checkTotalPlayerCpu = function()
+local CpuRamAverage
+CpuRamAverage = {
+	getHighestCpu = function(insts)
+		local maxinst, max = nil, 0
+		for instance, _ in pairs(insts) do
+			if instance.perf.cpuAverage>=max then
+				max = instance.perf.cpuAverage
+				maxinst = instance
+			end
+		end
+		return maxinst, max
+	end,
+	getHighestPlayerCpu = function(insts)
+		local worst_ply, worst_time = nil, 0
+		for pl, insts in pairs(SF.playerInstances) do
+			local cputotal = 0
+			for instance in pairs(insts) do
+				cputotal = cputotal + instance.perf.cpuAverage
+			end
+			if cputotal > worst_time then
+				worst_ply, worst_time = pl, cputotal
+			end
+		end
+		return worst_ply, worst_time
+	end,
+	checkTotalCpu = function()
+		local globaltotal = 0
 		for pl, insts in pairs(SF.playerInstances) do
 			local plquota = math.huge
 			local cputotal = 0
@@ -498,14 +528,7 @@ local CpuRamAverage = {
 
 			while cputotal>plquota do
 				-- Get highest average cpu instance
-				local max, maxinst = 0, nil
-				for instance, _ in pairs(insts) do
-					if instance.perf.cpuAverage>=max then
-						max = instance.perf.cpuAverage
-						maxinst = instance
-					end
-				end
-
+				local maxinst, max = CpuRamAverage.getHighestCpu(insts)
 				if maxinst then
 					maxinst:Error(SF.MakeError("SF: Player cpu time limit reached!", 1))
 					cputotal = cputotal - max
@@ -513,6 +536,24 @@ local CpuRamAverage = {
 				else
 					break -- Shouldn't ever happen but in case some freak numerical issue happens, prevent infinite loop
 				end
+			end
+
+			globaltotal = globaltotal + cputotal
+		end
+
+		while globalquota>0 and globaltotal>globalquota do
+			-- Find the player whose chips are using the most total cpu time
+			local worst_ply = CpuRamAverage.getHighestPlayerCpu(SF.playerInstances)
+			if not worst_ply then break end
+
+			-- Kill the heaviest chip of the player with the highest total usage
+			local maxinst, max = CpuRamAverage.getHighestCpu(SF.playerInstances[worst_ply])
+			if maxinst then
+				maxinst:Error(SF.MakeError("SF: Global cpu time limit reached!", 1))
+				globaltotal = globaltotal - max
+				SF.playerInstances[worst_ply][maxinst] = nil -- In case of freak issue the Error function doesn't remove the instance
+			else
+				break -- Shouldn't ever happen but in case some freak numerical issue happens, prevent infinite loop
 			end
 		end
 	end,
@@ -531,7 +572,15 @@ local CpuRamAverage = {
 		getAverageRam = function(self)
 			return self.ramAverage + (gcinfo() - self.ramAverage)*0.001
 		end,
+		getCpuReadableMetrics = function(self)
+			return math.Round(self.cpuAverage * 1000000), self.cpuAverage / self.cpuLimit * 100
+		end,
 		check = function(self, forceThrow, noThrow)
+			-- Prevent rediculous stack depth
+			if debug.getinfo(1024, "") then
+				return self:doError("sf stack overflow", true, noThrow, true)
+			end
+
 			-- Check ram and cleanup before checking cpu so time spent is measured
 			local ram = gcinfo()
 			if ram > self.ramLimit then
@@ -551,25 +600,32 @@ local CpuRamAverage = {
 			local cpuAverage = self:getAverageCpu()
 			if cpuAverage > self.cpuSoftLimit then
 				if cpuAverage > self.cpuLimit then
-					return self:doError("CPU usage exceeded!", true, noThrow, forceThrow or cpuAverage > self.cpuHardLimit)
+					return self:doError("CPU usage exceeded! "..string.format("(%dus, %d%%)", cpuAverage * 1e6, cpuAverage / self.cpuLimit * 100), true, noThrow, forceThrow or cpuAverage > self.cpuHardLimit)
 				else
 					return self:doError("CPU usage warning!", false, noThrow, false)
 				end
 			end
 		end,
 		doError = function(self, msg, nocatch, noThrow, forceThrow)
+			if self.errored then return end
 			if noThrow then
+				if nocatch then self.errored = true end
 				return SF.MakeError(msg, 3, nocatch, true)
-			elseif forceThrow or string.find(debug.getinfo(4, "S").short_src, "SF:", 1, true) then
-				if SERVER and nocatch then
-					local consolemsg = "[Starfall] "..msg..
-						(Ent_IsValid(self.instance.player)
-						and (" by " .. self.instance.player:Nick() .. " (" .. self.instance.player:SteamID() .. ")")
-						or (" by [Disconnected Player])"))
-					SF.Print(nil, consolemsg .. "\n")
-					MsgC(Color(255,0,0), consolemsg .. "\n")
+			else
+				local info = debug.getinfo(3, "S")
+				info = (info and info.short_src or "[C]")
+				if forceThrow or string.find(info, "SF:", 1, true) then
+					if nocatch then self.errored = true end
+					if SERVER and nocatch then
+						local consolemsg = "[Starfall] "..msg..
+							(Ent_IsValid(self.instance.player)
+							and (" by " .. self.instance.player:Nick() .. " (" .. self.instance.player:SteamID() .. ")")
+							or (" by [Disconnected Player])"))
+						SF.Print(nil, consolemsg .. "\n")
+						MsgC(Color(255,0,0), consolemsg .. "\n")
+					end
+					SF.Throw(msg, 3, nocatch)
 				end
-				SF.Throw(msg, 4, nocatch)
 			end
 		end,
 	},
@@ -586,7 +642,8 @@ local CpuRamAverage = {
 			cpuSoftLimit = cpuLimit,
 			cpuHardLimit = cpuLimit*1.5,
 			ramLimit = math.min(ramLimit, ramHardlimit*0.95),
-			ramHardlimit = ramHardlimit
+			ramHardlimit = ramHardlimit,
+			errored = false
 		}, t)
 	end
 }
@@ -787,6 +844,7 @@ hook.Add("Think", "SF_Think", function()
 
 	-- Check and attempt recovery from potential failures
 	if SF.runningOps then
+		debug.sethook()
 		SF.runningOps = false
 		SF.OnRunningOps(false)
 		ErrorNoHalt("[Starfall] ERROR: This should not happen, bad addons?\n")
@@ -795,7 +853,7 @@ hook.Add("Think", "SF_Think", function()
 	for instance in pairs(SF.allInstances) do
 		instance:runScriptHook("think")
 	end
-	CpuRamAverage.checkTotalPlayerCpu()
+	CpuRamAverage.checkTotalCpu()
 end)
 
 hook.Add("EntityRemoved", "SF_EntityRemoved", function(ent, snapshot)
@@ -821,10 +879,13 @@ hook.Add("EntityRemoved", "SF_EntityRemoved", function(ent, snapshot)
 end)
 
 function SF.Instance:Error(err)
+	self:pushCpuCheck()
+	self.perf:stop()
 	if self.runOnError then -- We have a custom error function, use that instead
 		self.runOnError(err)
 	else
 		-- Default behavior
 		self:deinitialize()
 	end
+	self:popCpuCheck()
 end
